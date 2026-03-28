@@ -1,0 +1,3347 @@
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ICP_PRICES, LEVELS, generateRandomPlatforms } from "./levels";
+import type { LevelData, Platform } from "./levels";
+import { createSFX } from "./sfx";
+
+const CANVAS_W = 480;
+const CANVAS_H = 640;
+
+type GameScreen =
+  | "TITLE"
+  | "INTRO"
+  | "PLAYING"
+  | "YEAR_COMPLETE"
+  | "GAME_OVER"
+  | "VICTORY";
+
+interface Player {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  vx: number;
+  vy: number;
+  onGround: boolean;
+  facing: 1 | -1;
+  state: "idle" | "run" | "jump" | "hit" | "victory" | "attacking";
+  hitTimer: number;
+  attackTimer: number;
+  attackClangPlayed: boolean;
+  frame: number;
+  frameTimer: number;
+}
+
+interface Hazard {
+  id: number;
+  type:
+    | "boulder"
+    | "candle"
+    | "pickaxe"
+    | "cart"
+    | "barrel"
+    | "doompost"
+    | "chest"
+    | "saltbag";
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  w: number;
+  h: number;
+  onGround: boolean;
+  wasOnGround: boolean;
+  rotation: number;
+  frame: number;
+}
+
+interface KoolAid {
+  x: number;
+  y: number;
+  collected: boolean;
+}
+
+interface AxePickup {
+  x: number;
+  y: number;
+  vy: number;
+  collected: boolean;
+  landed: boolean;
+}
+
+interface SpawnerState {
+  timer: number;
+}
+
+interface GameState {
+  screen: GameScreen;
+  introPage: number;
+  level: number;
+  lives: number;
+  score: number;
+  saltMeter: number; // 0-100
+  player: Player;
+  hazards: Hazard[];
+  koolaids: KoolAid[];
+  spawnerStates: SpawnerState[];
+  hasAxe: boolean;
+  axeTimer: number;
+  axePickups: AxePickup[];
+  icpModifier: number;
+  debuffTimer: number;
+  bearThrowTimer: number;
+  nextHazardId: number;
+  frameCount: number;
+  currentPlatforms: Platform[];
+  levelComplete: boolean;
+  victoryTimer: number;
+  bearArmRaise: number;
+  particleTimer: number;
+  steamParticles: { x: number; y: number; vy: number; alpha: number }[];
+  keys: Set<string>;
+  sfxQueue: string[];
+  footstepTimer: number;
+  bottleWarningTimer: number;
+}
+
+const PLAYER_W = 24;
+const PLAYER_H = 36;
+const GRAVITY = 0.45;
+const JUMP_VY = -10.5;
+const BASE_WALK = 2.6;
+
+function makePlayer(_levelIdx: number): Player {
+  return {
+    x: 30,
+    y: CANVAS_H - 40 - PLAYER_H,
+    w: PLAYER_W,
+    h: PLAYER_H,
+    vx: 0,
+    vy: 0,
+    onGround: false,
+    facing: 1,
+    state: "idle",
+    hitTimer: 0,
+    attackTimer: 0,
+    attackClangPlayed: false,
+    frame: 0,
+    frameTimer: 0,
+  };
+}
+
+function initLevel(gs: GameState, levelIdx: number) {
+  gs.player = makePlayer(levelIdx);
+  gs.hazards = [];
+  gs.spawnerStates = [];
+  gs.hasAxe = false;
+  gs.axeTimer = 0;
+  gs.axePickups = [];
+  gs.icpModifier = 1.0;
+  gs.debuffTimer = 0;
+  gs.bearThrowTimer = 0;
+  gs.nextHazardId = 1;
+  gs.levelComplete = false;
+  gs.victoryTimer = 0;
+  gs.bearArmRaise = 0;
+  gs.sfxQueue = [];
+  gs.footstepTimer = 0;
+  gs.bottleWarningTimer = 0;
+
+  // Generate random platforms for this level run
+  gs.currentPlatforms = generateRandomPlatforms(levelIdx);
+
+  // Place kool-aid bottles randomly on platforms
+  const placementPlats = gs.currentPlatforms.filter(
+    (p) => p.y < CANVAS_H - 50 && p.y > CANVAS_H - 560 && p.w > 40,
+  );
+  const numBottles = Math.max(2, 4 - Math.floor(levelIdx / 3));
+  gs.koolaids = [];
+  const usedPlats = new Set<number>();
+  for (let i = 0; i < numBottles && i < placementPlats.length; i++) {
+    let platIdx: number;
+    let tries = 0;
+    do {
+      platIdx = Math.floor(Math.random() * placementPlats.length);
+      tries++;
+    } while (usedPlats.has(platIdx) && tries < 20);
+    usedPlats.add(platIdx);
+    const plat = placementPlats[platIdx];
+    gs.koolaids.push({
+      x: plat.x + 10 + Math.random() * Math.max(0, plat.w - 20),
+      y: plat.y - 18,
+      collected: false,
+    });
+  }
+
+  // Place axe pickups randomly on mid platforms
+  const midPlats = gs.currentPlatforms.filter(
+    (p) => p.y < CANVAS_H - 50 && p.y > CANVAS_H - 550,
+  );
+  const numAxes = 1 + Math.floor(levelIdx / 4);
+  gs.axePickups = [];
+  for (let i = 0; i < Math.min(numAxes, 2); i++) {
+    const plat = midPlats[Math.floor(Math.random() * midPlats.length)];
+    if (plat) {
+      gs.axePickups.push({
+        x: plat.x + 20 + Math.random() * Math.max(0, plat.w - 40),
+        y: plat.y - 16,
+        vy: 0,
+        collected: false,
+        landed: true,
+      });
+    }
+  }
+}
+
+function rectOverlap(
+  ax: number,
+  ay: number,
+  aw: number,
+  ah: number,
+  bx: number,
+  by: number,
+  bw: number,
+  bh: number,
+): boolean {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+function updateGame(gs: GameState, _dt: number) {
+  if (gs.screen !== "PLAYING") return;
+  gs.frameCount++;
+  if (gs.bottleWarningTimer > 0) gs.bottleWarningTimer--;
+  const level = LEVELS[gs.level];
+  const p = gs.player;
+
+  // Salt meter decay
+  gs.saltMeter = Math.max(0, gs.saltMeter - 0.3);
+
+  // Speed modifier
+  const walkSpeed =
+    gs.debuffTimer > 0
+      ? BASE_WALK * 0.5
+      : gs.saltMeter >= 100
+        ? BASE_WALK * 0.6
+        : BASE_WALK;
+  const effectiveJumpVy = gs.debuffTimer > 0 ? JUMP_VY * 0.65 : JUMP_VY;
+
+  // Bear arm animation
+  gs.bearArmRaise = (gs.bearArmRaise + 0.04) % (Math.PI * 2);
+
+  // Hit timer
+  if (p.hitTimer > 0) p.hitTimer--;
+
+  // Ladder system removed - vertical movement via platform gaps only
+
+  // Controls
+  const left = gs.keys.has("ArrowLeft");
+  const right = gs.keys.has("ArrowRight");
+  const jumping = gs.keys.has("Space") || gs.keys.has("KeyZ");
+
+  // AxeSmash: proactive range smash from gamepad B button
+  if (gs.keys.has("AxeSmash") && gs.hasAxe && p.hitTimer === 0) {
+    const smashed: number[] = [];
+    for (let i = 0; i < gs.hazards.length; i++) {
+      const h = gs.hazards[i];
+      const dist = Math.hypot(
+        h.x + h.w / 2 - (p.x + p.w / 2),
+        h.y + h.h / 2 - (p.y + p.h / 2),
+      );
+      if (dist < 60) smashed.push(i);
+    }
+    // Always trigger animation on press (not held)
+    if (p.attackTimer === 0) {
+      gs.sfxQueue.push("axe_whoosh");
+      p.attackTimer = 20;
+      p.attackClangPlayed = smashed.length === 0; // skip clang if nothing to smash
+    }
+    if (smashed.length > 0) {
+      for (let si = smashed.length - 1; si >= 0; si--) {
+        const idx = smashed[si];
+        const h = gs.hazards[idx];
+        if (h.type === "chest") {
+          gs.icpModifier = Math.min(2.5, gs.icpModifier + 0.15);
+          gs.score += 2000;
+          gs.sfxQueue.push("chest_good");
+        } else {
+          gs.score += 150;
+        }
+        gs.hazards.splice(idx, 1);
+      }
+    }
+  }
+  // Horizontal
+  if (left) {
+    p.vx = -walkSpeed;
+    p.facing = -1;
+  } else if (right) {
+    p.vx = walkSpeed;
+    p.facing = 1;
+  } else p.vx = 0;
+
+  // Jump
+  if (jumping && p.onGround) {
+    p.vy = effectiveJumpVy;
+    p.onGround = false;
+    gs.sfxQueue.push("jump");
+  }
+
+  // Gravity
+  p.vy += GRAVITY;
+
+  // Move player
+  p.x += p.vx;
+  p.y += p.vy;
+
+  // Wall bounds
+  if (p.x < 0) p.x = 0;
+  if (p.x + p.w > CANVAS_W) p.x = CANVAS_W - p.w;
+
+  // Platform collisions (one-way: can jump up through, land when falling)
+  const wasAirborne = !p.onGround;
+  p.onGround = false;
+  for (const plat of gs.currentPlatforms) {
+    if (p.x + p.w > plat.x && p.x < plat.x + plat.w) {
+      const prevBottom = p.y + p.h - p.vy;
+      if (p.vy >= 0 && prevBottom <= plat.y + 2 && p.y + p.h >= plat.y) {
+        p.y = plat.y - p.h;
+        p.vy = 0;
+        p.onGround = true;
+      }
+    }
+  }
+
+  // Land sound
+  if (wasAirborne && p.onGround) {
+    gs.sfxQueue.push("land");
+  }
+
+  // Fall off screen
+  if (p.y > CANVAS_H) {
+    loseLife(gs);
+    return;
+  }
+
+  // Decrement attack timer
+  if (p.attackTimer > 0) {
+    p.attackTimer--;
+    if (p.attackTimer === 10 && !p.attackClangPlayed) {
+      p.attackClangPlayed = true;
+      gs.sfxQueue.push("axe_clang");
+    }
+  }
+
+  // Player state
+  if (p.hitTimer > 0) p.state = "hit";
+  else if (p.attackTimer > 0) p.state = "attacking";
+  else if (gs.levelComplete) p.state = "victory";
+  else if (!p.onGround) p.state = "jump";
+  else if (p.vx !== 0) p.state = "run";
+  else p.state = "idle";
+
+  // Footstep sound
+  if (p.state === "run" && p.onGround) {
+    gs.footstepTimer++;
+    if (gs.footstepTimer >= 8) {
+      gs.footstepTimer = 0;
+      gs.sfxQueue.push("footstep");
+    }
+  } else {
+    gs.footstepTimer = 0;
+  }
+
+  // Animate frames
+  p.frameTimer++;
+  if (p.frameTimer > 6) {
+    p.frame = (p.frame + 1) % 4;
+    p.frameTimer = 0;
+  }
+
+  // Bear throw system - all hazards thrown from bear position
+  const bearThrowInterval = Math.max(50, 120 - gs.level * 8);
+  gs.bearThrowTimer++;
+  if (gs.bearThrowTimer >= bearThrowInterval) {
+    gs.bearThrowTimer = 0;
+    gs.sfxQueue.push("bear_throw");
+    const bearCx = level.bearPosition.x + 20;
+    const bearCy = level.bearPosition.y;
+
+    const roll = Math.random();
+    type HazType =
+      | "boulder"
+      | "candle"
+      | "pickaxe"
+      | "cart"
+      | "barrel"
+      | "doompost"
+      | "chest"
+      | "saltbag";
+    let hType: HazType;
+    if (roll < 0.15) {
+      hType = "chest";
+    } else {
+      const types: HazType[] = [
+        "boulder",
+        "candle",
+        "cart",
+        "barrel",
+        "doompost",
+        "saltbag",
+        "boulder",
+        "boulder",
+      ];
+      hType = types[Math.floor(Math.random() * types.length)];
+    }
+
+    const hw =
+      hType === "cart"
+        ? 32
+        : hType === "candle"
+          ? 18
+          : hType === "boulder"
+            ? 20
+            : hType === "chest"
+              ? 22
+              : hType === "pickaxe"
+                ? 20
+                : hType === "saltbag"
+                  ? 20
+                  : hType === "barrel"
+                    ? 16
+                    : 14;
+    const hh =
+      hType === "cart"
+        ? 22
+        : hType === "candle"
+          ? 24
+          : hType === "boulder"
+            ? 20
+            : hType === "chest"
+              ? 18
+              : hType === "pickaxe"
+                ? 20
+                : hType === "saltbag"
+                  ? 22
+                  : hType === "barrel"
+                    ? 18
+                    : 18;
+
+    const throwDir = Math.random() < 0.5 ? -1 : 1;
+    const throwVx = throwDir * (1.2 + Math.random() * 1.0 + gs.level * 0.1);
+
+    gs.hazards.push({
+      id: gs.nextHazardId++,
+      type: hType,
+      x: bearCx - hw / 2,
+      y: bearCy,
+      vx: throwVx,
+      vy: -4,
+      w: hw,
+      h: hh,
+      onGround: false,
+      wasOnGround: false,
+      rotation: 0,
+      frame: 0,
+    });
+  }
+
+  // Update hazards
+  const toRemove: number[] = [];
+  for (let i = 0; i < gs.hazards.length; i++) {
+    const h = gs.hazards[i];
+    const isPickaxe = h.type === "pickaxe";
+
+    if (!isPickaxe) {
+      // Gravity for rolling hazards
+      h.vy += GRAVITY * 0.7;
+      h.x += h.vx;
+      h.y += h.vy;
+      h.rotation += h.vx * 0.08;
+
+      // Platform collision (flat one-way)
+      h.wasOnGround = h.onGround;
+      h.onGround = false;
+      for (const plat of gs.currentPlatforms) {
+        if (h.x + h.w > plat.x && h.x < plat.x + plat.w) {
+          const prevB = h.y + h.h - h.vy;
+          if (h.vy >= 0 && prevB <= plat.y + 2 && h.y + h.h >= plat.y) {
+            h.y = plat.y - h.h;
+            h.vy = 0;
+            h.onGround = true;
+            // Only randomize direction when FIRST landing on a new platform
+            if (!h.wasOnGround) {
+              const rollSpeed = Math.max(Math.abs(h.vx), 2.0 + gs.level * 0.15);
+              h.vx = (Math.random() < 0.5 ? -1 : 1) * rollSpeed;
+            }
+            // Maintain rolling speed while on ground (don't let friction stop it)
+            if (Math.abs(h.vx) < 1.5) {
+              h.vx = (h.vx >= 0 ? 1 : -1) * (1.5 + gs.level * 0.1);
+            }
+          }
+        }
+      }
+
+      // Bounce off walls
+      if (h.x < 0) {
+        h.x = 0;
+        h.vx = Math.abs(h.vx);
+      }
+      if (h.x + h.w > CANVAS_W) {
+        h.x = CANVAS_W - h.w;
+        h.vx = -Math.abs(h.vx);
+      }
+
+      // Remove if off bottom
+      if (h.y > CANVAS_H + 20) {
+        toRemove.push(i);
+        continue;
+      }
+    } else {
+      // Pickaxe falls straight down
+      h.y += h.vy;
+      h.vy += GRAVITY * 0.3;
+      for (const plat of gs.currentPlatforms) {
+        if (h.x + h.w > plat.x && h.x < plat.x + plat.w) {
+          const prevB = h.y + h.h - h.vy;
+          if (prevB <= plat.y && h.y + h.h >= plat.y) {
+            toRemove.push(i);
+            break;
+          }
+        }
+      }
+      if (h.y > CANVAS_H) {
+        toRemove.push(i);
+        continue;
+      }
+    }
+
+    // Near-miss salt increase
+    const dist = Math.hypot(
+      h.x + h.w / 2 - (p.x + p.w / 2),
+      h.y + h.h / 2 - (p.y + p.h / 2),
+    );
+    if (dist < 24 && p.hitTimer === 0 && h.type !== "chest") {
+      gs.saltMeter = Math.min(100, gs.saltMeter + 0.3);
+    }
+
+    // Hit detection
+    if (rectOverlap(p.x + 2, p.y + 2, p.w - 4, p.h - 4, h.x, h.y, h.w, h.h)) {
+      // Chest interaction
+      if (h.type === "chest") {
+        if (gs.hasAxe) {
+          gs.icpModifier = Math.min(2.5, gs.icpModifier + 0.15);
+          gs.score += 2000;
+          p.hitTimer = 10;
+          gs.sfxQueue.push("axe_smash");
+          gs.sfxQueue.push("chest_good");
+        } else {
+          gs.icpModifier = Math.max(0.3, gs.icpModifier - 0.12);
+          gs.saltMeter = Math.min(100, gs.saltMeter + 25);
+          gs.debuffTimer = 300;
+          p.hitTimer = 40;
+          gs.sfxQueue.push("chest_bad");
+        }
+        toRemove.push(i);
+        continue;
+      }
+
+      // Candle removes axe
+      if (h.type === "candle" && gs.hasAxe && p.hitTimer === 0) {
+        gs.hasAxe = false;
+        gs.axeTimer = 0;
+        gs.saltMeter = Math.min(100, gs.saltMeter + 15);
+        p.hitTimer = 50;
+        gs.sfxQueue.push("axe_swing");
+        toRemove.push(i);
+        continue;
+      }
+
+      // Axe smashes other hazards
+      if (gs.hasAxe && p.hitTimer === 0) {
+        gs.score += 150;
+        gs.sfxQueue.push("axe_swing");
+        toRemove.push(i);
+        continue;
+      }
+
+      // Salt bag - big salt meter hit but no life lost
+      if (h.type === "saltbag" && p.hitTimer === 0) {
+        gs.saltMeter = Math.min(100, gs.saltMeter + 35);
+        gs.debuffTimer = 180;
+        p.hitTimer = 50;
+        gs.sfxQueue.push("hit");
+        toRemove.push(i);
+        continue;
+      }
+
+      // Normal hit
+      if (p.hitTimer === 0) {
+        gs.saltMeter = Math.min(100, gs.saltMeter + 15);
+        p.hitTimer = 60;
+        gs.sfxQueue.push("hit");
+        loseLife(gs);
+        return;
+      }
+    }
+  }
+  for (let i = toRemove.length - 1; i >= 0; i--) {
+    gs.hazards.splice(toRemove[i], 1);
+  }
+
+  // Kool-Aid pickups
+  for (const ka of gs.koolaids) {
+    if (!ka.collected && rectOverlap(p.x, p.y, p.w, p.h, ka.x, ka.y, 12, 18)) {
+      ka.collected = true;
+      gs.saltMeter = Math.max(0, gs.saltMeter - 30);
+      gs.score += 500;
+      gs.sfxQueue.push("powerup");
+    }
+  }
+
+  // Axe pickup - fall physics and collection
+  for (const ap of gs.axePickups) {
+    if (ap.collected) continue;
+    if (!ap.landed) {
+      ap.vy += GRAVITY * 0.6;
+      ap.y += ap.vy;
+      for (const plat of gs.currentPlatforms) {
+        if (ap.x + 16 > plat.x && ap.x < plat.x + plat.w) {
+          const prevB = ap.y + 16 - ap.vy;
+          if (ap.vy >= 0 && prevB <= plat.y + 2 && ap.y + 16 >= plat.y) {
+            ap.y = plat.y - 16;
+            ap.vy = 0;
+            ap.landed = true;
+            break;
+          }
+        }
+      }
+      if (ap.y > CANVAS_H + 20) {
+        ap.collected = true;
+      }
+    }
+    if (!ap.collected && rectOverlap(p.x, p.y, p.w, p.h, ap.x, ap.y, 16, 16)) {
+      ap.collected = true;
+      gs.hasAxe = true;
+      gs.axeTimer = 600;
+      gs.sfxQueue.push("powerup");
+    }
+  }
+
+  // Axe countdown
+  if (gs.hasAxe) {
+    gs.axeTimer--;
+    if (gs.axeTimer <= 0) {
+      gs.hasAxe = false;
+      gs.axeTimer = 0;
+    }
+  }
+
+  // Debuff countdown
+  if (gs.debuffTimer > 0) gs.debuffTimer--;
+
+  // Steam particles
+  gs.particleTimer = (gs.particleTimer || 0) + 1;
+  if (gs.saltMeter > 75 && gs.particleTimer % 4 === 0) {
+    gs.steamParticles.push({
+      x: p.x + p.w / 2 + (Math.random() - 0.5) * 8,
+      y: p.y,
+      vy: -1.2,
+      alpha: 0.8,
+    });
+  }
+  gs.steamParticles = gs.steamParticles.filter((sp) => sp.alpha > 0);
+  for (const sp of gs.steamParticles) {
+    sp.y += sp.vy;
+    sp.alpha -= 0.02;
+  }
+
+  // Exit check
+  const exit = level.exitPosition;
+  if (
+    !gs.levelComplete &&
+    rectOverlap(p.x, p.y, p.w, p.h, exit.x - 16, exit.y - 16, 36, 36)
+  ) {
+    const allBottlesCollected = gs.koolaids.every((k) => k.collected);
+    if (allBottlesCollected) {
+      gs.levelComplete = true;
+      gs.score += 1000;
+      gs.sfxQueue.push("level_complete");
+    } else {
+      gs.bottleWarningTimer = 180;
+      loseLife(gs);
+    }
+  }
+
+  if (gs.levelComplete) {
+    gs.victoryTimer++;
+    if (gs.victoryTimer > 90) {
+      if (gs.level >= 7) {
+        gs.screen = "VICTORY";
+      } else {
+        gs.screen = "YEAR_COMPLETE";
+      }
+    }
+  }
+}
+
+function loseLife(gs: GameState) {
+  gs.lives--;
+  if (gs.lives <= 0) {
+    gs.sfxQueue.push("game_over");
+    gs.screen = "GAME_OVER";
+  } else {
+    gs.sfxQueue.push("lose_life");
+    initLevel(gs, gs.level);
+  }
+}
+
+// --- RENDERING ---
+
+function drawPlayer(
+  ctx: CanvasRenderingContext2D,
+  p: Player,
+  saltMeter: number,
+  hasAxe: boolean,
+) {
+  const { x, y, facing, state, hitTimer, frame } = p;
+  const flipped = facing === -1;
+
+  ctx.save();
+  if (flipped) {
+    ctx.translate(x + p.w, y);
+    ctx.scale(-1, 1);
+  } else {
+    ctx.translate(x, y);
+  }
+
+  // Hit flash
+  if (hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0) {
+    ctx.globalAlpha = 0.3;
+  }
+
+  const angry = saltMeter > 75;
+  const veryAngry = saltMeter >= 100;
+  const skinTone = "#7B4A2D";
+  const skinShade = "#5a3520";
+  const shirtBase = veryAngry ? "#cc2222" : "#d8d8d8";
+  const shirtShade = veryAngry ? "#991a1a" : "#b0b0b0";
+
+  if (state === "run") {
+    // ===== SIDE PROFILE (facing right) =====
+    // legSwing cycles -8 to +8: positive = front leg forward
+    const legSwing = Math.sin((frame * Math.PI) / 2) * 8;
+
+    // --- BACK LEG (behind body, darker) ---
+    ctx.fillStyle = "#14143a";
+    ctx.fillRect(7, 20 + legSwing, 8, 12);
+    // back boot
+    ctx.fillStyle = "#1a100a";
+    ctx.fillRect(6, 31 + legSwing, 10, 5);
+
+    // --- BACK ARM (behind body, in shadow) ---
+    ctx.fillStyle = skinShade;
+    ctx.fillRect(4, 13 + legSwing * 0.9, 5, 9);
+
+    // --- TORSO (side profile, slightly narrower) ---
+    ctx.fillStyle = shirtBase;
+    ctx.fillRect(5, 12, 14, 10);
+    ctx.fillStyle = shirtShade;
+    ctx.fillRect(5, 19, 14, 3);
+    ctx.fillStyle = veryAngry ? "#ff4444" : "#f0f0f0";
+    ctx.fillRect(6, 13, 6, 2); // highlight
+
+    // --- FRONT LEG (in front of body) ---
+    ctx.fillStyle = "#1e1e3c";
+    ctx.fillRect(9, 20 - legSwing, 8, 12);
+    // knee highlight
+    ctx.fillStyle = "#2e2e5c";
+    ctx.fillRect(10, 24 - legSwing, 5, 3);
+    // front boot
+    ctx.fillStyle = "#2a1a0e";
+    ctx.fillRect(8, 31 - legSwing, 10, 5);
+    // toe extends forward (right = direction of travel)
+    ctx.fillRect(15, 33 - legSwing, 4, 2);
+    ctx.fillStyle = "#3d2b1a";
+    ctx.fillRect(9, 31 - legSwing, 7, 2);
+
+    // --- FRONT ARM (swings forward/back counter to front leg) ---
+    ctx.fillStyle = skinTone;
+    ctx.fillRect(14, 13 - legSwing * 0.9, 5, 9);
+    ctx.fillStyle = skinShade;
+    ctx.fillRect(14, 13 - legSwing * 0.9, 2, 9);
+
+    // --- HEAD (side profile) ---
+    ctx.fillStyle = skinTone;
+    ctx.fillRect(6, 2, 14, 11);
+    // ear on back side
+    ctx.fillRect(5, 5, 2, 5);
+    // nose bump on front side
+    ctx.fillStyle = skinShade;
+    ctx.fillRect(19, 7, 2, 2);
+    // jaw shading
+    ctx.fillRect(6, 10, 14, 3);
+    ctx.fillRect(6, 2, 2, 9); // back edge shadow
+
+    // --- CAP (side profile) ---
+    ctx.fillStyle = "#1a1a3e";
+    ctx.fillRect(5, -1, 15, 5);
+    ctx.fillStyle = "#111130";
+    ctx.fillRect(5, 3, 15, 2);
+    // brim extends forward (right)
+    ctx.fillStyle = "#252550";
+    ctx.fillRect(18, 3, 7, 2);
+    ctx.fillStyle = "#2a2a5a";
+    ctx.fillRect(10, -2, 4, 2);
+
+    // --- EYE (single, on front face side) ---
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(15, 5, 3, 3);
+    ctx.fillStyle = "#000000";
+    if (angry) {
+      ctx.fillRect(15, 6, 3, 2);
+      ctx.fillStyle = "#4a2a10";
+      ctx.fillRect(14, 4, 5, 1);
+    } else {
+      ctx.fillRect(15, 6, 2, 2);
+      ctx.fillStyle = "#4a2a10";
+      ctx.fillRect(14, 4, 4, 1);
+    }
+
+    // --- MOUTH (profile) ---
+    if (veryAngry) {
+      ctx.fillStyle = "#1a0a0a";
+      ctx.fillRect(14, 10, 4, 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(14, 10, 1, 2);
+      ctx.fillRect(16, 10, 1, 2);
+    } else if (angry) {
+      ctx.fillStyle = "#3a1a0a";
+      ctx.fillRect(14, 10, 4, 1);
+      ctx.fillRect(13, 9, 2, 2);
+    } else {
+      ctx.fillStyle = "#3a1a0a";
+      ctx.fillRect(14, 10, 4, 1);
+    }
+  } else {
+    // ===== FRONT-FACING (idle, jump, hit, victory) =====
+    const jumpLeg = state === "jump" ? -2 : 0;
+
+    // --- BOOTS ---
+    ctx.fillStyle = "#2a1a0e";
+    ctx.fillRect(1, 30, 9, 6);
+    ctx.fillRect(0, 33, 10, 3);
+    ctx.fillRect(13, 30, 9, 6);
+    ctx.fillRect(12, 33, 10, 3);
+    ctx.fillStyle = "#3d2b1a";
+    ctx.fillRect(2, 30, 7, 2);
+    ctx.fillRect(14, 30, 7, 2);
+
+    // --- PANTS ---
+    ctx.fillStyle = "#1e1e3c";
+    ctx.fillRect(2, 20 + jumpLeg, 9, 12);
+    ctx.fillRect(13, 20 + jumpLeg, 9, 12);
+    ctx.fillStyle = "#2e2e5c";
+    ctx.fillRect(3, 24 + jumpLeg, 6, 3);
+    ctx.fillRect(14, 24 + jumpLeg, 6, 3);
+
+    // --- T-SHIRT BODY ---
+    ctx.fillStyle = shirtBase;
+    ctx.fillRect(1, 12, 22, 10);
+    ctx.fillStyle = shirtShade;
+    ctx.fillRect(1, 19, 22, 3);
+    ctx.fillRect(1, 12, 3, 10);
+    ctx.fillStyle = veryAngry ? "#ff4444" : "#f0f0f0";
+    ctx.fillRect(4, 13, 8, 2);
+
+    // --- ARMS ---
+    if (state === "jump") {
+      ctx.fillStyle = skinTone;
+      ctx.fillRect(-4, 4, 5, 10);
+      ctx.fillRect(23, 4, 5, 10);
+      ctx.fillStyle = skinShade;
+      ctx.fillRect(-4, 4, 2, 10);
+    } else if (state === "victory") {
+      ctx.fillStyle = skinTone;
+      ctx.fillRect(-4, 2, 5, 12);
+      ctx.fillRect(23, 2, 5, 12);
+    } else {
+      ctx.fillStyle = skinTone;
+      ctx.fillRect(-3, 13, 5, 9);
+      ctx.fillRect(22, 13, 5, 9);
+      ctx.fillStyle = skinShade;
+      ctx.fillRect(-3, 13, 2, 9);
+    }
+
+    // --- HEAD ---
+    ctx.fillStyle = skinTone;
+    ctx.fillRect(3, 2, 18, 12);
+    ctx.fillRect(2, 5, 2, 5);
+    ctx.fillRect(20, 5, 2, 5);
+    ctx.fillStyle = skinShade;
+    ctx.fillRect(3, 11, 18, 3);
+    ctx.fillRect(3, 2, 3, 10);
+
+    // --- BASEBALL CAP ---
+    ctx.fillStyle = "#1a1a3e";
+    ctx.fillRect(2, -2, 20, 6);
+    ctx.fillStyle = "#111130";
+    ctx.fillRect(2, 3, 20, 2);
+    ctx.fillStyle = "#252550";
+    ctx.fillRect(14, 4, 9, 2);
+    ctx.fillStyle = "#2a2a5a";
+    ctx.fillRect(10, -3, 4, 2);
+
+    // --- EYES ---
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(6, 6, 4, 3);
+    ctx.fillRect(14, 6, 4, 3);
+    ctx.fillStyle = "#000000";
+    if (angry) {
+      ctx.fillRect(7, 7, 3, 2);
+      ctx.fillRect(15, 7, 3, 2);
+      ctx.fillStyle = "#4a2a10";
+      ctx.fillRect(5, 5, 5, 1);
+      ctx.fillRect(14, 5, 5, 1);
+      ctx.fillRect(5, 5, 1, 1);
+      ctx.fillRect(18, 5, 1, 1);
+    } else {
+      ctx.fillRect(7, 7, 2, 2);
+      ctx.fillRect(15, 7, 2, 2);
+    }
+
+    // --- MOUTH / EXPRESSION ---
+    if (veryAngry) {
+      ctx.fillStyle = "#1a0a0a";
+      ctx.fillRect(8, 11, 8, 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(8, 11, 2, 2);
+      ctx.fillRect(11, 11, 2, 2);
+      ctx.fillRect(14, 11, 2, 2);
+    } else if (angry) {
+      ctx.fillStyle = "#3a1a0a";
+      ctx.fillRect(8, 11, 8, 1);
+      ctx.fillRect(7, 10, 2, 2);
+      ctx.fillRect(15, 10, 2, 2);
+    } else {
+      ctx.fillStyle = "#3a1a0a";
+      ctx.fillRect(8, 11, 8, 1);
+    }
+
+    // --- NOSE ---
+    ctx.fillStyle = skinShade;
+    ctx.fillRect(11, 9, 2, 2);
+  }
+
+  if (state === "attacking") {
+    const isWindup = p.attackTimer > 10;
+    ctx.save();
+    ctx.shadowColor = "#ffd700";
+    ctx.shadowBlur = 14;
+    if (isWindup) {
+      // Arms raised overhead
+      ctx.fillStyle = "#c8a87a";
+      ctx.fillRect(-4, -4, 5, 14);
+      ctx.fillRect(23, -4, 5, 14);
+      // Axe raised above head
+      ctx.fillStyle = "#8B5E3C";
+      ctx.fillRect(22, -14, 3, 14);
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(14, -16, 14, 7);
+      ctx.fillRect(22, -20, 6, 10);
+      ctx.fillStyle = "#cccccc";
+      ctx.fillRect(15, -15, 5, 3);
+      ctx.fillStyle = "#dddddd";
+      ctx.fillRect(23, -19, 2, 3);
+    } else {
+      // Arms slammed down
+      ctx.fillStyle = "#c8a87a";
+      ctx.fillRect(-4, 16, 5, 12);
+      ctx.fillRect(23, 16, 5, 12);
+      // Axe slammed down
+      ctx.fillStyle = "#8B5E3C";
+      ctx.fillRect(22, 14, 3, 14);
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(16, 24, 14, 7);
+      ctx.fillRect(22, 20, 6, 10);
+      ctx.fillStyle = "#cccccc";
+      ctx.fillRect(17, 25, 5, 3);
+      ctx.fillStyle = "#dddddd";
+      ctx.fillRect(23, 21, 2, 3);
+    }
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  } else if (hasAxe) {
+    ctx.save();
+    ctx.shadowColor = "#ffd700";
+    ctx.shadowBlur = 8;
+    if (state === "run") {
+      ctx.fillStyle = "#8B5E3C";
+      ctx.fillRect(17, 10, 3, 10);
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(18, 3, 10, 7);
+      ctx.fillRect(22, 1, 6, 10);
+      ctx.fillStyle = "#cccccc";
+      ctx.fillRect(19, 3, 4, 3);
+    } else {
+      ctx.fillStyle = "#8B5E3C";
+      ctx.fillRect(22, 5, 3, 12);
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(16, -2, 14, 8);
+      ctx.fillRect(22, -5, 6, 10);
+      ctx.fillStyle = "#cccccc";
+      ctx.fillRect(17, -1, 5, 3);
+    }
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+function drawBear(
+  ctx: CanvasRenderingContext2D,
+  bx: number,
+  by: number,
+  armRaise: number,
+) {
+  ctx.save();
+  ctx.translate(bx, by);
+
+  // Drop shadow
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(4, 46, 36, 6);
+
+  // Body
+  ctx.fillStyle = "#6B0000";
+  ctx.fillRect(6, 16, 30, 28);
+  // Belly lighter
+  ctx.fillStyle = "#A52A2A";
+  ctx.fillRect(10, 19, 22, 22);
+  // Belly shading
+  ctx.fillStyle = "#8b1a1a";
+  ctx.fillRect(10, 36, 22, 5);
+
+  // Fur texture on body edges
+  ctx.fillStyle = "#500000";
+  for (let fi = 0; fi < 5; fi++) {
+    ctx.fillRect(6, 18 + fi * 5, 2, 3);
+    ctx.fillRect(34, 18 + fi * 5, 2, 3);
+    ctx.fillRect(9 + fi * 5, 43, 3, 2);
+  }
+
+  // Legs
+  ctx.fillStyle = "#6B0000";
+  ctx.fillRect(9, 40, 10, 8);
+  ctx.fillRect(23, 40, 10, 8);
+  // Paws
+  ctx.fillStyle = "#8B0000";
+  ctx.fillRect(8, 46, 12, 4);
+  ctx.fillRect(22, 46, 12, 4);
+
+  // Arms with animation
+  const raiseL = Math.sin(armRaise) * 8;
+  const raiseR = Math.sin(armRaise + Math.PI) * 6;
+  ctx.fillStyle = "#6B0000";
+  // Left arm
+  ctx.fillRect(-2, 16 + raiseL, 10, 16);
+  ctx.fillStyle = "#8B0000";
+  ctx.fillRect(-3, 24 + raiseL, 6, 8); // fist
+  // Right arm
+  ctx.fillStyle = "#6B0000";
+  ctx.fillRect(34, 16 + raiseR, 10, 16);
+  ctx.fillStyle = "#8B0000";
+  ctx.fillRect(35, 24 + raiseR, 6, 8); // fist
+
+  // Foam/spittle when arm raised
+  if (Math.sin(armRaise) > 0.3) {
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillRect(15, 30, 3, 2);
+    ctx.fillRect(22, 31, 2, 2);
+    ctx.fillRect(18, 33, 4, 2);
+  }
+
+  // Head
+  ctx.fillStyle = "#8B0000";
+  ctx.fillRect(8, 0, 26, 22);
+  ctx.fillStyle = "#A52A2A";
+  ctx.fillRect(10, 2, 22, 18);
+
+  // Ears with inner
+  ctx.fillStyle = "#6B0000";
+  ctx.fillRect(5, -5, 10, 10);
+  ctx.fillRect(27, -5, 10, 10);
+  ctx.fillStyle = "#cc3333";
+  ctx.fillRect(7, -4, 6, 7);
+  ctx.fillRect(29, -4, 6, 7);
+
+  // Glowing red eyes
+  ctx.shadowColor = "#ff0000";
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = "#ff2200";
+  ctx.fillRect(11, 6, 6, 6);
+  ctx.fillRect(25, 6, 6, 6);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(14, 7, 2, 2);
+  ctx.fillRect(28, 7, 2, 2);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(13, 8, 2, 2);
+  ctx.fillRect(27, 8, 2, 2);
+
+  // Snout
+  ctx.fillStyle = "#cc5555";
+  ctx.fillRect(14, 14, 14, 8);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(16, 14, 3, 2); // nostrils
+  ctx.fillRect(23, 14, 3, 2);
+
+  // Mouth - angry snarl
+  ctx.fillStyle = "#330000";
+  ctx.fillRect(15, 18, 12, 4);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(15, 18, 3, 3); // teeth
+  ctx.fillRect(20, 18, 3, 3);
+  ctx.fillRect(25, 18, 2, 3);
+
+  // $ on belly in gold
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 4;
+  ctx.font = "bold 12px monospace";
+  ctx.fillStyle = "#ffd700";
+  ctx.fillText("$", 17, 35);
+  ctx.shadowBlur = 0;
+
+  ctx.restore();
+}
+
+function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
+  ctx.save();
+  ctx.translate(h.x + h.w / 2, h.y + h.h / 2);
+  ctx.rotate(h.rotation);
+  ctx.translate(-h.w / 2, -h.h / 2);
+
+  switch (h.type) {
+    case "boulder": {
+      // Faceted dark boulder
+      ctx.fillStyle = "#444444";
+      ctx.fillRect(2, 0, 16, 20);
+      ctx.fillRect(0, 3, 20, 14);
+      // Facet shading
+      ctx.fillStyle = "#555555";
+      ctx.fillRect(2, 0, 8, 8);
+      ctx.fillRect(0, 3, 6, 6);
+      ctx.fillStyle = "#333333";
+      ctx.fillRect(12, 10, 8, 8);
+      ctx.fillRect(10, 14, 8, 6);
+      // Top-left glint
+      ctx.fillStyle = "#cccccc";
+      ctx.fillRect(2, 1, 4, 2);
+      ctx.fillRect(1, 2, 2, 3);
+      // Salt specks
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(5, 7, 1, 1);
+      ctx.fillRect(13, 3, 1, 1);
+      ctx.fillRect(8, 14, 1, 1);
+      ctx.fillRect(15, 11, 1, 1);
+      break;
+    }
+    case "candle": {
+      // Wax pool at base
+      ctx.fillStyle = "#991100";
+      ctx.fillRect(1, h.h - 4, h.w - 2, 4);
+      // Wax drips on sides
+      ctx.fillStyle = "#bb1a00";
+      ctx.fillRect(2, 8, 3, 6);
+      ctx.fillRect(h.w - 5, 12, 3, 5);
+      ctx.fillRect(5, 14, 2, 4);
+      // Body
+      ctx.fillStyle = "#cc2200";
+      ctx.fillRect(3, 4, h.w - 6, h.h - 8);
+      // Body highlight
+      ctx.fillStyle = "#ee3300";
+      ctx.fillRect(4, 5, 4, h.h - 10);
+      ctx.fillStyle = "#aa1a00";
+      ctx.fillRect(h.w - 7, 5, 3, h.h - 10);
+      // Wick
+      ctx.fillStyle = "#222222";
+      ctx.fillRect(h.w / 2 - 1, 1, 3, 5);
+      // Animated flame (outer)
+      const flameFlicker = Math.sin(Date.now() * 0.02) * 1.5;
+      ctx.fillStyle = "#ffdd00";
+      ctx.fillRect(h.w / 2 - 3, -5 + flameFlicker, 6, 7);
+      // Inner flame
+      ctx.fillStyle = "#ff8800";
+      ctx.fillRect(h.w / 2 - 2, -4 + flameFlicker, 4, 5);
+      ctx.fillStyle = "#ffeeaa";
+      ctx.fillRect(h.w / 2 - 1, -3 + flameFlicker, 2, 3);
+      break;
+    }
+    case "pickaxe": {
+      // Wooden handle (horizontal)
+      ctx.fillStyle = "#8B5E3C";
+      ctx.fillRect(0, 10, h.w, 4);
+      ctx.fillStyle = "#6B4020";
+      ctx.fillRect(0, 12, h.w, 2);
+      // Handle grain
+      ctx.fillStyle = "#9B6E4C";
+      ctx.fillRect(3, 10, 1, 4);
+      ctx.fillRect(10, 10, 1, 4);
+      ctx.fillRect(16, 10, 1, 4);
+      // Metal head
+      ctx.fillStyle = "#888888";
+      ctx.fillRect(0, 2, 10, 8);
+      // Pick point
+      ctx.fillRect(8, 0, 4, 12);
+      // Axe flat side
+      ctx.fillRect(0, 5, 6, 10);
+      // Metal shading
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(1, 2, 4, 3);
+      ctx.fillRect(8, 0, 2, 4);
+      // Glint
+      ctx.fillStyle = "#dddddd";
+      ctx.fillRect(9, 1, 2, 2);
+      break;
+    }
+    case "cart": {
+      // Drop shadow
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.fillRect(2, h.h - 1, h.w, 3);
+      // Axle bar
+      ctx.fillStyle = "#333333";
+      ctx.fillRect(3, h.h - 6, h.w - 6, 3);
+      // Wheels (detailed with spokes)
+      const wheelPositions = [5, h.w - 9];
+      for (const wx of wheelPositions) {
+        // Wheel outer
+        ctx.fillStyle = "#222222";
+        ctx.beginPath();
+        ctx.arc(wx + 4, h.h - 4, 6, 0, Math.PI * 2);
+        ctx.fill();
+        // Wheel rim
+        ctx.strokeStyle = "#555555";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(wx + 4, h.h - 4, 5, 0, Math.PI * 2);
+        ctx.stroke();
+        // Spokes
+        ctx.strokeStyle = "#444444";
+        ctx.lineWidth = 1;
+        for (let sp = 0; sp < 4; sp++) {
+          const angle = (sp * Math.PI) / 2;
+          ctx.beginPath();
+          ctx.moveTo(wx + 4, h.h - 4);
+          ctx.lineTo(
+            wx + 4 + Math.cos(angle) * 4,
+            h.h - 4 + Math.sin(angle) * 4,
+          );
+          ctx.stroke();
+        }
+        // Hub
+        ctx.fillStyle = "#666666";
+        ctx.fillRect(wx + 3, h.h - 5, 2, 2);
+      }
+      // Cart body
+      ctx.fillStyle = "#5c3a1e";
+      ctx.fillRect(0, 2, h.w, h.h - 10);
+      // Body shading
+      ctx.fillStyle = "#3d2010";
+      ctx.fillRect(0, h.h - 14, h.w, 4);
+      ctx.fillStyle = "#7a4a28";
+      ctx.fillRect(0, 2, h.w, 4);
+      // Metal rivets
+      ctx.fillStyle = "#444444";
+      ctx.fillRect(3, 5, 3, 3);
+      ctx.fillRect(h.w - 6, 5, 3, 3);
+      ctx.fillRect(3, h.h - 14, 3, 3);
+      ctx.fillRect(h.w - 6, h.h - 14, 3, 3);
+      // Cargo rocks inside
+      ctx.fillStyle = "#555555";
+      ctx.fillRect(3, 4, 5, 4);
+      ctx.fillRect(9, 3, 6, 5);
+      ctx.fillRect(16, 4, 5, 4);
+      ctx.fillStyle = "#666666";
+      ctx.fillRect(4, 4, 2, 2);
+      ctx.fillRect(11, 3, 3, 3);
+      break;
+    }
+    case "barrel": {
+      // Barrel shape
+      ctx.fillStyle = "#cc6600";
+      ctx.fillRect(2, 0, h.w - 4, h.h);
+      ctx.fillRect(0, 3, h.w, h.h - 6);
+      // Wood grain
+      ctx.fillStyle = "#bb5500";
+      ctx.fillRect(3, 0, 2, h.h);
+      ctx.fillRect(8, 0, 2, h.h);
+      ctx.fillRect(h.w - 5, 0, 2, h.h);
+      // Metal bands
+      ctx.fillStyle = "#333333";
+      ctx.fillRect(0, 2, h.w, 2);
+      ctx.fillRect(0, h.h / 2 - 1, h.w, 2);
+      ctx.fillRect(0, h.h - 4, h.w, 2);
+      // Band sheen
+      ctx.fillStyle = "#555555";
+      ctx.fillRect(0, 2, h.w, 1);
+      ctx.fillRect(0, h.h / 2 - 1, h.w, 1);
+      // LIQUIDATED text
+      ctx.save();
+      ctx.fillStyle = "#ff2200";
+      ctx.font = "bold 4px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("LQDT", h.w / 2, h.h / 2 + 4);
+      ctx.textAlign = "left";
+      ctx.restore();
+      break;
+    }
+    case "doompost": {
+      // Warning diamond shape
+      ctx.fillStyle = "#dd0000";
+      ctx.beginPath();
+      ctx.moveTo(h.w / 2, 0);
+      ctx.lineTo(h.w, h.h / 2);
+      ctx.lineTo(h.w / 2, h.h);
+      ctx.lineTo(0, h.h / 2);
+      ctx.closePath();
+      ctx.fill();
+      // Border
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(h.w / 2, 1);
+      ctx.lineTo(h.w - 1, h.h / 2);
+      ctx.lineTo(h.w / 2, h.h - 1);
+      ctx.lineTo(1, h.h / 2);
+      ctx.closePath();
+      ctx.stroke();
+      // Inner lighter diamond
+      ctx.fillStyle = "#ff3333";
+      ctx.beginPath();
+      ctx.moveTo(h.w / 2, 3);
+      ctx.lineTo(h.w - 3, h.h / 2);
+      ctx.lineTo(h.w / 2, h.h - 3);
+      ctx.lineTo(3, h.h / 2);
+      ctx.closePath();
+      ctx.fill();
+      // ! mark
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 9px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("!", h.w / 2, h.h / 2 + 3);
+      ctx.textAlign = "left";
+      break;
+    }
+    case "chest": {
+      ctx.fillStyle = "#5c3a1e";
+      ctx.fillRect(0, h.h * 0.4, h.w, h.h * 0.6);
+      ctx.fillStyle = "#7a4a28";
+      ctx.fillRect(0, h.h * 0.4, h.w, 3);
+      ctx.fillStyle = "#6B4020";
+      ctx.fillRect(0, 0, h.w, h.h * 0.45);
+      ctx.fillStyle = "#8B5a30";
+      ctx.fillRect(0, 0, h.w, 3);
+      ctx.fillStyle = "#888888";
+      ctx.fillRect(0, h.h * 0.2, h.w, 2);
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(0, 0, 3, 6);
+      ctx.fillRect(h.w - 3, 0, 3, 6);
+      ctx.fillRect(0, h.h - 6, 3, 6);
+      ctx.fillRect(h.w - 3, h.h - 6, 3, 6);
+      ctx.fillStyle = "#ffd700";
+      ctx.fillRect(h.w / 2 - 3, h.h * 0.3, 6, 8);
+      ctx.fillStyle = "#cc9900";
+      ctx.fillRect(h.w / 2 - 2, h.h * 0.35, 4, 5);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(h.w / 2 - 1, h.h * 0.37, 2, 3);
+      ctx.fillStyle = "rgba(255,215,0,0.3)";
+      ctx.fillRect(2, 1, h.w - 4, 4);
+      break;
+    }
+    case "saltbag": {
+      // Burlap sack body
+      ctx.fillStyle = "#d4c4a0";
+      ctx.fillRect(2, 4, h.w - 4, h.h - 6);
+      // Rounded top
+      ctx.fillStyle = "#c8b890";
+      ctx.fillRect(4, 2, h.w - 8, 4);
+      ctx.fillRect(2, 4, h.w - 4, 3);
+      // Burlap texture lines
+      ctx.fillStyle = "#b8a880";
+      for (let tx = 4; tx < h.w - 4; tx += 4) {
+        ctx.fillRect(tx, 5, 1, h.h - 8);
+      }
+      for (let ty = 6; ty < h.h - 4; ty += 5) {
+        ctx.fillRect(3, ty, h.w - 6, 1);
+      }
+      // Tie string at top
+      ctx.fillStyle = "#8B6914";
+      ctx.fillRect(h.w / 2 - 3, 1, 6, 3);
+      ctx.fillStyle = "#6a4e10";
+      ctx.fillRect(h.w / 2 - 2, 0, 4, 2);
+      // "SALT" label
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 7px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("SALT", h.w / 2, h.h / 2 + 3);
+      ctx.textAlign = "left";
+      // Shadow
+      ctx.fillStyle = "#a09070";
+      ctx.fillRect(h.w - 5, 5, 3, h.h - 8);
+      ctx.fillRect(3, h.h - 6, h.w - 6, 3);
+      break;
+    }
+  }
+  ctx.restore();
+}
+
+function drawPlatform(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+) {
+  // Drop shadow
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(x + 3, y + h + 2, w, 4);
+
+  // Body
+  ctx.fillStyle = "#2a1f0e";
+  ctx.fillRect(x, y, w, h);
+
+  // Top surface
+  ctx.fillStyle = "#4a3520";
+  ctx.fillRect(x, y, w, h - 2);
+
+  // Plank grain lines
+  ctx.strokeStyle = "#3a2a15";
+  ctx.lineWidth = 1;
+  const plankW = Math.max(20, Math.floor(w / 4));
+  for (let px = x + 2; px < x + w - 2; px += plankW) {
+    ctx.beginPath();
+    ctx.moveTo(px, y + 2);
+    ctx.lineTo(px, y + h - 2);
+    ctx.stroke();
+  }
+
+  // Metal trim on top
+  ctx.strokeStyle = "#666666";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + w, y);
+  ctx.stroke();
+
+  // Support struts for wide platforms
+  if (w > 80) {
+    ctx.fillStyle = "#1e1508";
+    const strutXs = [x + 4, x + Math.floor(w / 2) - 3, x + w - 10];
+    for (const sx of strutXs) {
+      ctx.fillRect(sx, y + h, 6, 8);
+      ctx.fillRect(sx - 2, y + h + 6, 10, 3);
+    }
+  }
+
+  // Salt crystals on top
+  ctx.fillStyle = "#c8e8f0";
+  for (let cx = x + 12; cx < x + w - 8; cx += 25) {
+    ctx.fillRect(cx + 1, y - 3, 2, 3);
+    ctx.fillRect(cx, y - 2, 4, 1);
+    ctx.fillRect(cx + 8, y - 4, 2, 4);
+    ctx.fillRect(cx + 7, y - 3, 4, 1);
+    ctx.fillStyle = "rgba(79,195,247,0.5)";
+    ctx.fillRect(cx + 1, y - 2, 2, 2);
+    ctx.fillRect(cx + 8, y - 3, 2, 2);
+    ctx.fillStyle = "#c8e8f0";
+  }
+}
+function drawExit(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const pulse = 0.6 + Math.sin(frame * 0.08) * 0.3;
+  ctx.save();
+
+  // Outer glow halo
+  ctx.shadowColor = "#4fc3f7";
+  ctx.shadowBlur = 20 * pulse;
+  ctx.globalAlpha = pulse * 0.4;
+  ctx.fillStyle = "#0a2a6a";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 30, 38, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+
+  // Outer ellipse
+  ctx.fillStyle = "#0a2a6a";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 26, 33, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mid ellipse
+  ctx.fillStyle = "#1565c0";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 20, 27, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Inner teal ellipse
+  ctx.fillStyle = "#4fc3f7";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 14, 20, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Swirl lines
+  ctx.strokeStyle = "rgba(255,255,255,0.6)";
+  ctx.lineWidth = 1.5;
+  for (let s = 0; s < 5; s++) {
+    const angle = frame * 0.04 + (s * Math.PI * 2) / 5;
+    ctx.beginPath();
+    ctx.arc(x, y, 10 + s * 2, angle, angle + 1.2);
+    ctx.stroke();
+  }
+
+  // Pulsing outer ring
+  ctx.globalAlpha = 0.3 + Math.sin(frame * 0.1) * 0.25;
+  ctx.strokeStyle = "#4fc3f7";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(x, y, 28, 36, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // ICP text
+  ctx.shadowColor = "#ffffff";
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 8px monospace";
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.fillText("ICP", x, y + 3);
+  ctx.shadowBlur = 0;
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+
+function drawKoolAid(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.1) * 2;
+  ctx.save();
+  ctx.translate(0, bob);
+
+  // Teal glow
+  ctx.shadowColor = "#00e5ff";
+  ctx.shadowBlur = 10;
+
+  // Bottle body (teal with rounded shoulders)
+  ctx.fillStyle = "#00bcd4";
+  ctx.fillRect(x + 3, y + 6, 10, 13);
+  ctx.fillRect(x + 2, y + 8, 12, 9);
+  // Rounded shoulders
+  ctx.fillRect(x + 4, y + 4, 8, 5);
+
+  // White label area
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowBlur = 0;
+  ctx.fillRect(x + 3, y + 9, 10, 6);
+
+  // KAS label text
+  ctx.fillStyle = "#006688";
+  ctx.font = "bold 4px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("KAS", x + 8, y + 14);
+  ctx.textAlign = "left";
+
+  // Bottle highlight
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.fillRect(x + 4, y + 6, 2, 10);
+
+  // Cap
+  ctx.shadowColor = "#00e5ff";
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = "#ff5722";
+  ctx.fillRect(x + 4, y, 8, 5);
+  ctx.fillStyle = "#ff8a50";
+  ctx.fillRect(x + 5, y, 5, 2);
+
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawAxePickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.08) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = "#8B5E3C";
+  ctx.fillRect(4, 8, 4, 14);
+  ctx.fillStyle = "#6B4020";
+  ctx.fillRect(5, 8, 2, 14);
+  ctx.fillStyle = "#aaaaaa";
+  ctx.fillRect(0, 0, 14, 9);
+  ctx.fillRect(8, -2, 6, 13);
+  ctx.fillStyle = "#cccccc";
+  ctx.fillRect(1, 1, 5, 3);
+  ctx.fillStyle = "#dddddd";
+  ctx.fillRect(9, -1, 2, 3);
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#ffd700";
+  ctx.textAlign = "center";
+  ctx.fillText("AXE", 8, 28);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawBackground(
+  ctx: CanvasRenderingContext2D,
+  _level: number,
+  frame: number,
+) {
+  // === LAYER 1: Deep background - stone block grid ===
+  ctx.fillStyle = "#080810";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Stone block grid
+  ctx.fillStyle = "#0e0e1c";
+  for (let gy = 0; gy < CANVAS_H; gy += 32) {
+    for (let gx = 0; gx < CANVAS_W; gx += 40) {
+      const offset = (Math.floor(gy / 32) % 2) * 20;
+      ctx.fillRect(gx + offset, gy, 38, 30);
+    }
+  }
+  // Mortar lines (horizontal)
+  ctx.fillStyle = "#0a0a16";
+  for (let gy = 32; gy < CANVAS_H; gy += 32) {
+    ctx.fillRect(0, gy - 1, CANVAS_W, 2);
+  }
+  // Mortar lines (vertical - staggered)
+  for (let gy = 0; gy < CANVAS_H; gy += 32) {
+    const offset = (Math.floor(gy / 32) % 2) * 20;
+    for (let gx = offset; gx < CANVAS_W; gx += 40) {
+      ctx.fillRect(gx - 1, gy, 2, 32);
+    }
+  }
+
+  // Embedded white salt vein flecks
+  ctx.fillStyle = "rgba(232,244,248,0.07)";
+  const fleckSeeds = [
+    23, 87, 142, 203, 267, 318, 371, 415, 55, 99, 178, 244, 302, 358, 412, 468,
+  ];
+  for (let i = 0; i < fleckSeeds.length; i++) {
+    const fx = (fleckSeeds[i] * 17 + i * 31) % CANVAS_W;
+    const fy = (fleckSeeds[i] * 13 + i * 47) % CANVAS_H;
+    ctx.fillRect(fx, fy, 3 + (i % 3), 1);
+    ctx.fillRect(fx + 1, fy + 1, 1 + (i % 2), 1);
+  }
+
+  // === LAYER 2: Mine supports - beams, chains, rails ===
+  const beamXPositions = [80, 200, 320, 400];
+  for (const bx of beamXPositions) {
+    // Vertical beam
+    ctx.fillStyle = "#3d2510";
+    ctx.fillRect(bx - 4, 48, 8, CANVAS_H - 48);
+    // Beam highlight
+    ctx.fillStyle = "#5a3820";
+    ctx.fillRect(bx - 4, 48, 2, CANVAS_H - 48);
+    ctx.fillStyle = "#2a1a08";
+    ctx.fillRect(bx + 2, 48, 2, CANVAS_H - 48);
+    // Horizontal crossbeam at top
+    ctx.fillStyle = "#3d2510";
+    ctx.fillRect(bx - 30, 80, 60, 6);
+    ctx.fillStyle = "#5a3820";
+    ctx.fillRect(bx - 30, 80, 60, 2);
+    // Nail/bolt at beam junction
+    ctx.fillStyle = "#666666";
+    ctx.fillRect(bx - 2, 83, 4, 4);
+    ctx.fillStyle = "#888888";
+    ctx.fillRect(bx - 1, 83, 2, 2);
+
+    // Hanging chains from crossbeam
+    ctx.fillStyle = "#555555";
+    for (let cy = 86; cy < 200; cy += 8) {
+      const chainX = bx - 1;
+      // Oval chain links
+      ctx.fillRect(chainX, cy, 3, 3);
+      ctx.fillStyle = "#777777";
+      ctx.fillRect(chainX, cy, 1, 1);
+      ctx.fillStyle = "#555555";
+    }
+  }
+
+  // Rusted rail lines at platform-ish heights
+  const railHeights = [200, 320, 440, 540];
+  for (const ry of railHeights) {
+    // Top rail
+    ctx.fillStyle = "#5c3a1e";
+    ctx.fillRect(0, ry, CANVAS_W, 3);
+    ctx.fillStyle = "#7a5030";
+    ctx.fillRect(0, ry, CANVAS_W, 1);
+    // Tie marks
+    ctx.fillStyle = "#3a2510";
+    for (let tx = 10; tx < CANVAS_W; tx += 18) {
+      ctx.fillRect(tx, ry - 2, 8, 7);
+    }
+  }
+
+  // === LAYER 3: Wall silhouettes and salt crystals ===
+  // Left wall jagged edge
+  ctx.fillStyle = "#050508";
+  const leftEdge = [
+    0, 18, 8, 22, 5, 20, 14, 10, 18, 12, 8, 20, 6, 16, 12, 20, 8, 14, 18, 10,
+  ];
+  for (let i = 0; i < leftEdge.length; i++) {
+    ctx.fillRect(0, i * 32, leftEdge[i], 32);
+  }
+  // Right wall jagged edge
+  const rightEdge = [
+    12, 20, 8, 18, 14, 10, 20, 8, 16, 14, 10, 18, 12, 20, 8, 14, 16, 10, 18, 12,
+  ];
+  for (let i = 0; i < rightEdge.length; i++) {
+    ctx.fillRect(CANVAS_W - rightEdge[i], i * 32, rightEdge[i], 32);
+  }
+
+  // Salt crystal clusters on walls
+  const crystalClusters = [
+    { x: 14, y: 100 },
+    { x: 14, y: 260 },
+    { x: 14, y: 400 },
+    { x: 14, y: 530 },
+    { x: CANVAS_W - 22, y: 150 },
+    { x: CANVAS_W - 22, y: 300 },
+    { x: CANVAS_W - 22, y: 450 },
+    { x: CANVAS_W - 22, y: 570 },
+    { x: 240, y: 60 },
+  ];
+
+  for (const cc of crystalClusters) {
+    const glowAnim = 0.4 + Math.sin(frame * 0.04 + cc.x * 0.1) * 0.2;
+    // Crystal glow halo
+    ctx.save();
+    ctx.shadowColor = "#4fc3f7";
+    ctx.shadowBlur = 8 * glowAnim;
+    ctx.globalAlpha = glowAnim * 0.5;
+    ctx.fillStyle = "#4fc3f7";
+    ctx.fillRect(cc.x - 3, cc.y - 6, 10, 14);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+
+    // Crystal diamonds (upward pointing)
+    ctx.fillStyle = "#c8e8f0";
+    // Large center crystal
+    ctx.fillRect(cc.x + 2, cc.y - 8, 3, 10);
+    ctx.fillRect(cc.x, cc.y - 6, 7, 6);
+    // Left smaller crystal
+    ctx.fillRect(cc.x - 1, cc.y - 5, 2, 7);
+    ctx.fillRect(cc.x - 2, cc.y - 3, 4, 4);
+    // Right smaller crystal
+    ctx.fillRect(cc.x + 6, cc.y - 4, 2, 6);
+    ctx.fillRect(cc.x + 5, cc.y - 2, 4, 3);
+    // Inner glow fill
+    ctx.fillStyle = "rgba(79,195,247,0.4)";
+    ctx.fillRect(cc.x + 3, cc.y - 6, 1, 6);
+    ctx.fillRect(cc.x, cc.y - 4, 2, 3);
+    ctx.restore();
+  }
+
+  // Glowing blue energy wisps near bottom
+  const wispCount = 5;
+  for (let wi = 0; wi < wispCount; wi++) {
+    const wx = 60 + wi * 90 + Math.sin(frame * 0.03 + wi * 1.2) * 20;
+    const wy = CANVAS_H - 30 + Math.cos(frame * 0.05 + wi * 0.8) * 8;
+    const wAlpha = 0.3 + Math.sin(frame * 0.06 + wi) * 0.2;
+    ctx.save();
+    ctx.shadowColor = "#4fc3f7";
+    ctx.shadowBlur = 12;
+    ctx.globalAlpha = wAlpha;
+    ctx.fillStyle = "#4fc3f7";
+    ctx.fillRect(wx - 2, wy - 4, 4, 8);
+    ctx.fillRect(wx - 4, wy - 2, 8, 4);
+    ctx.restore();
+  }
+
+  // === ATMOSPHERIC: Vignette + scanlines + ambient ===
+  // Radial vignette
+  const vg = ctx.createRadialGradient(
+    CANVAS_W / 2,
+    CANVAS_H * 0.5,
+    80,
+    CANVAS_W / 2,
+    CANVAS_H * 0.5,
+    340,
+  );
+  vg.addColorStop(0, "rgba(0,0,0,0)");
+  vg.addColorStop(1, "rgba(0,0,4,0.75)");
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Blue ambient light from center-bottom
+  const ambientGrad = ctx.createRadialGradient(
+    CANVAS_W / 2,
+    CANVAS_H + 20,
+    10,
+    CANVAS_W / 2,
+    CANVAS_H + 20,
+    240,
+  );
+  ambientGrad.addColorStop(0, "rgba(30,80,120,0.18)");
+  ambientGrad.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = ambientGrad;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Scan-line texture (subtle)
+  ctx.fillStyle = "rgba(0,0,0,0.04)";
+  for (let sy = 0; sy < CANVAS_H; sy += 2) {
+    ctx.fillRect(0, sy, CANVAS_W, 1);
+  }
+
+  // HUD background panel
+  ctx.fillStyle = "#0a0a18";
+  ctx.fillRect(0, 0, CANVAS_W, 52);
+  ctx.fillStyle = "#4fc3f7";
+  ctx.fillRect(0, 50, CANVAS_W, 2);
+}
+
+function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
+  const level = gs.level;
+  const price = ICP_PRICES[level] * gs.icpModifier;
+  const portfolio = price * 10000;
+  const saltPct = gs.saltMeter / 100;
+
+  // === LIVES: pixel heart shapes ===
+  for (let i = 0; i < gs.lives; i++) {
+    const hx = 8 + i * 16;
+    const hy = 8;
+    ctx.shadowColor = "#ff0000";
+    ctx.shadowBlur = 4;
+    ctx.fillStyle = "#ff3333";
+    // Heart shape (pixel art)
+    ctx.fillRect(hx + 1, hy, 3, 2);
+    ctx.fillRect(hx + 6, hy, 3, 2);
+    ctx.fillRect(hx, hy + 2, 10, 4);
+    ctx.fillRect(hx + 1, hy + 6, 8, 2);
+    ctx.fillRect(hx + 2, hy + 8, 6, 2);
+    ctx.fillRect(hx + 3, hy + 10, 4, 2);
+    ctx.fillRect(hx + 4, hy + 12, 2, 1);
+    // Heart highlight
+    ctx.fillStyle = "#ff6666";
+    ctx.fillRect(hx + 2, hy, 1, 1);
+    ctx.fillRect(hx + 1, hy + 2, 2, 2);
+    ctx.shadowBlur = 0;
+  }
+
+  // === YEAR display: gold ===
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 14px monospace";
+  ctx.fillStyle = "#ffd700";
+  ctx.textAlign = "left";
+  ctx.fillText(`YR ${level + 1}/8`, 62, 22);
+  ctx.shadowBlur = 0;
+  ctx.font = "8px monospace";
+  ctx.fillStyle = "#aa9900";
+  ctx.fillText("YEAR", 62, 34);
+
+  // === ICP Price panel ===
+  ctx.fillStyle = "#0a1a2a";
+  ctx.fillRect(112, 6, 82, 38);
+  ctx.strokeStyle = "#4fc3f7";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(112, 6, 82, 38);
+  ctx.font = "7px monospace";
+  ctx.fillStyle = "#4fc3f7";
+  ctx.fillText("ICP PRICE", 116, 17);
+  ctx.font = "bold 12px monospace";
+  ctx.fillStyle = "#4fc3f7";
+  ctx.fillText(`$${price.toFixed(2)}`, 116, 35);
+
+  // === Portfolio panel ===
+  ctx.fillStyle = "#0a1a0a";
+  ctx.fillRect(200, 6, 96, 38);
+  ctx.strokeStyle = "#81c784";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(200, 6, 96, 38);
+  ctx.font = "7px monospace";
+  ctx.fillStyle = "#81c784";
+  ctx.fillText("PORTFOLIO", 204, 17);
+  ctx.font = "bold 10px monospace";
+  ctx.fillStyle = "#81c784";
+  ctx.fillText(`$${portfolio.toLocaleString()}`, 204, 35);
+
+  // === Score (right-aligned) ===
+  ctx.font = "bold 10px monospace";
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "right";
+  ctx.fillText(`${gs.score}`, 435, 22);
+  ctx.font = "7px monospace";
+  ctx.fillStyle = "#888888";
+  ctx.fillText("SCORE", 435, 33);
+  ctx.textAlign = "left";
+
+  // === Salt Meter: vertical thermometer on far right ===
+  const barX = 454;
+  const barY = 4;
+  const barW = 12;
+  const barH = 42;
+
+  // Background
+  ctx.fillStyle = "#111111";
+  ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+
+  // Gradient fill
+  const saltGrad = ctx.createLinearGradient(barX, barY + barH, barX, barY);
+  saltGrad.addColorStop(0, "#4caf50");
+  saltGrad.addColorStop(0.5, "#ff9800");
+  saltGrad.addColorStop(1, "#f44336");
+  const fillH = barH * saltPct;
+  ctx.fillStyle = saltGrad;
+  if (fillH > 0) {
+    ctx.fillRect(barX, barY + barH - fillH, barW, fillH);
+  }
+
+  // Border - glow red when critical
+  if (saltPct > 0.9) {
+    ctx.shadowColor = "#ff0000";
+    ctx.shadowBlur = 8;
+    ctx.strokeStyle = "#ff3333";
+  } else {
+    ctx.strokeStyle = "#555555";
+  }
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, barH);
+  ctx.shadowBlur = 0;
+
+  // Tick marks
+  ctx.fillStyle = "#333333";
+  ctx.fillRect(barX + barW, barY + barH * 0.25, 2, 1);
+  ctx.fillRect(barX + barW, barY + barH * 0.5, 2, 1);
+  ctx.fillRect(barX + barW, barY + barH * 0.75, 2, 1);
+
+  // Skull icon when maxed
+  if (saltPct >= 1.0) {
+    ctx.font = "9px monospace";
+    ctx.fillStyle = "#ff3333";
+    ctx.textAlign = "center";
+    ctx.fillText("☠", barX + barW / 2, barY - 2);
+    ctx.textAlign = "left";
+  }
+
+  // SALT label below
+  ctx.font = "6px monospace";
+  ctx.fillStyle = saltPct > 0.9 ? "#ff3333" : "#888888";
+  ctx.textAlign = "center";
+  ctx.fillText("SALT", barX + barW / 2, barY + barH + 8);
+  ctx.textAlign = "left";
+
+  // Axe timer bar (when active)
+  if (gs.hasAxe) {
+    const axePct = gs.axeTimer / 600;
+    const axeBarX = 438;
+    const axeBarY = 4;
+    const axeBarW = 10;
+    const axeBarH = 42;
+    ctx.fillStyle = "#111111";
+    ctx.fillRect(axeBarX - 1, axeBarY - 1, axeBarW + 2, axeBarH + 2);
+    const axeGrad = ctx.createLinearGradient(
+      axeBarX,
+      axeBarY + axeBarH,
+      axeBarX,
+      axeBarY,
+    );
+    axeGrad.addColorStop(0, "#ffd700");
+    axeGrad.addColorStop(1, "#ff9800");
+    const axeFillH = axeBarH * axePct;
+    ctx.fillStyle = axeGrad;
+    if (axeFillH > 0)
+      ctx.fillRect(axeBarX, axeBarY + axeBarH - axeFillH, axeBarW, axeFillH);
+    ctx.strokeStyle = "#ffd700";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(axeBarX, axeBarY, axeBarW, axeBarH);
+    ctx.font = "6px monospace";
+    ctx.fillStyle = "#ffd700";
+    ctx.textAlign = "center";
+    ctx.fillText("AXE", axeBarX + axeBarW / 2, axeBarY + axeBarH + 8);
+    ctx.textAlign = "left";
+  }
+
+  // Debuff indicator
+  if (gs.debuffTimer > 0 && Math.floor(gs.frameCount / 15) % 2 === 0) {
+    ctx.font = "bold 8px monospace";
+    ctx.fillStyle = "#ff9800";
+    ctx.textAlign = "right";
+    ctx.fillText("SALTY CHEST!", 435, 44);
+    ctx.textAlign = "left";
+  }
+
+  // Bottle counter with mini koolaid icon
+  const remaining = gs.koolaids.filter((k) => !k.collected).length;
+  const totalBottles = gs.koolaids.length;
+  if (totalBottles > 0) {
+    const bx = 304;
+    const by = 8;
+    // Mini kool-aid bottle icon
+    ctx.fillStyle = "#00bcd4";
+    ctx.fillRect(bx + 2, by + 4, 7, 9);
+    ctx.fillRect(bx + 1, by + 6, 9, 6);
+    ctx.fillRect(bx + 3, by + 2, 5, 4);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(bx + 2, by + 7, 7, 4);
+    ctx.fillStyle = "#ff5722";
+    ctx.fillRect(bx + 3, by, 5, 3);
+    // Count
+    ctx.font = "bold 11px monospace";
+    ctx.fillStyle = remaining > 0 ? "#00cfff" : "#81c784";
+    ctx.textAlign = "left";
+    ctx.fillText(`x${remaining}/${totalBottles}`, bx + 13, by + 12);
+  }
+}
+
+function drawTitleScreen(ctx: CanvasRenderingContext2D, frame: number) {
+  ctx.fillStyle = "#050508";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Background stone grid
+  ctx.fillStyle = "#0a0a14";
+  for (let gy = 0; gy < CANVAS_H; gy += 32) {
+    for (let gx = 0; gx < CANVAS_W; gx += 40) {
+      const offset = (Math.floor(gy / 32) % 2) * 20;
+      ctx.fillRect(gx + offset, gy, 38, 30);
+    }
+  }
+
+  // Scan-lines
+  ctx.fillStyle = "rgba(0,0,0,0.06)";
+  for (let sy = 0; sy < CANVAS_H; sy += 2) {
+    ctx.fillRect(0, sy, CANVAS_W, 1);
+  }
+
+  // Dramatic stalactites (varied irregular shapes)
+  const stalactites = [
+    { x: -10, w: 55, h: 55 },
+    { x: 42, w: 28, h: 38 },
+    { x: 78, w: 44, h: 70 },
+    { x: 128, w: 32, h: 42 },
+    { x: 168, w: 48, h: 60 },
+    { x: 224, w: 24, h: 30 },
+    { x: 252, w: 40, h: 80 },
+    { x: 300, w: 30, h: 50 },
+    { x: 336, w: 50, h: 65 },
+    { x: 392, w: 36, h: 45 },
+    { x: 432, w: 28, h: 55 },
+    { x: 460, w: 40, h: 40 },
+  ];
+
+  for (const st of stalactites) {
+    // Main stalactite body
+    ctx.fillStyle = "#0f0f1e";
+    ctx.fillRect(st.x, 0, st.w, st.h);
+    // Tip point
+    ctx.fillStyle = "#0a0a18";
+    ctx.fillRect(st.x + st.w / 2 - 4, st.h - 8, 8, 10);
+    ctx.fillRect(st.x + st.w / 2 - 2, st.h, 4, 6);
+    ctx.fillRect(st.x + st.w / 2 - 1, st.h + 4, 2, 4);
+    // Side shading
+    ctx.fillStyle = "#171730";
+    ctx.fillRect(st.x, 0, 4, st.h);
+    // Salt crystal tip
+    const tipGlow = 0.3 + Math.sin(frame * 0.04 + st.x * 0.1) * 0.2;
+    ctx.save();
+    ctx.globalAlpha = tipGlow;
+    ctx.fillStyle = "#c8e8f0";
+    ctx.fillRect(st.x + st.w / 2 - 1, st.h + 5, 2, 5);
+    ctx.restore();
+  }
+
+  // Vignette
+  const vg = ctx.createRadialGradient(
+    CANVAS_W / 2,
+    CANVAS_H * 0.5,
+    100,
+    CANVAS_W / 2,
+    CANVAS_H * 0.5,
+    340,
+  );
+  vg.addColorStop(0, "rgba(0,0,0,0)");
+  vg.addColorStop(1, "rgba(0,0,8,0.8)");
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // === TITLE TEXT: SALTMINE XCAPE ===
+  const glow = 0.7 + Math.sin(frame * 0.05) * 0.25;
+
+  // Outer glow pass
+  ctx.save();
+  ctx.shadowColor = "#4fc3f7";
+  ctx.shadowBlur = 40 * glow;
+  ctx.font = "bold 42px monospace";
+  ctx.fillStyle = "rgba(79,195,247,0.3)";
+  ctx.textAlign = "center";
+  ctx.fillText("SALTMINE", CANVAS_W / 2, 190);
+  ctx.fillText("XCAPE", CANVAS_W / 2, 238);
+  ctx.restore();
+
+  // Inner glow pass
+  ctx.save();
+  ctx.shadowColor = "#ffffff";
+  ctx.shadowBlur = 12 * glow;
+  ctx.font = "bold 42px monospace";
+  ctx.fillStyle = "#4fc3f7";
+  ctx.textAlign = "center";
+  ctx.fillText("SALTMINE", CANVAS_W / 2, 190);
+  ctx.fillText("XCAPE", CANVAS_W / 2, 238);
+  ctx.restore();
+
+  // Tagline
+  ctx.save();
+  ctx.font = "italic 12px monospace";
+  ctx.fillStyle = "#8899aa";
+  ctx.textAlign = "center";
+  ctx.fillText("A CRYPTO SURVIVAL STORY", CANVAS_W / 2, 268);
+  ctx.restore();
+
+  // ICP staking subline
+  ctx.font = "10px monospace";
+  ctx.fillStyle = "#445566";
+  ctx.textAlign = "center";
+  ctx.fillText("10,000 ICP STAKED. SURVIVE 8 YEARS.", CANVAS_W / 2, 290);
+
+  // Blinking START prompt
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.save();
+    ctx.shadowColor = "#ffd700";
+    ctx.shadowBlur = 10;
+    ctx.font = "bold 12px monospace";
+    ctx.fillStyle = "#ffd700";
+    ctx.textAlign = "center";
+    ctx.fillText("[ PRESS SPACE TO START ]", CANVAS_W / 2, 380);
+    ctx.restore();
+  }
+
+  // === BEAR SILHOUETTE at bottom ===
+  ctx.save();
+  ctx.translate(CANVAS_W / 2 - 22, 460);
+
+  // Bear body silhouette
+  ctx.fillStyle = "#1a0000";
+  ctx.fillRect(6, 16, 30, 28);
+  ctx.fillRect(0, 24, 42, 18);
+  // Head
+  ctx.fillRect(8, 0, 26, 22);
+  // Ears
+  ctx.fillRect(5, -5, 10, 10);
+  ctx.fillRect(27, -5, 10, 10);
+  // Arms raised
+  const bearSway = Math.sin(frame * 0.04) * 5;
+  ctx.fillRect(-4, 12 + bearSway, 12, 18);
+  ctx.fillRect(34, 12 - bearSway, 12, 18);
+
+  // Glowing red eyes
+  ctx.shadowColor = "#ff0000";
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = "#ff2200";
+  ctx.fillRect(13, 6, 5, 5);
+  ctx.fillRect(24, 6, 5, 5);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  ctx.save();
+  ctx.shadowColor = "#ff0000";
+  ctx.shadowBlur = 8;
+  ctx.font = "bold 11px monospace";
+  ctx.fillStyle = "#cc0000";
+  ctx.textAlign = "center";
+  ctx.fillText("EVIL CRYPTO BEAR", CANVAS_W / 2, 560);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  ctx.textAlign = "left";
+}
+
+const INTRO_PAGES = [
+  {
+    title: "THE STORY SO FAR...",
+    lines: [
+      "James Salt holds 10,000 ICP.",
+      "",
+      "Portfolio value: $150,000",
+      "",
+      "He has diamond hands.",
+      "He has conviction.",
+      "He has a baseball cap.",
+    ],
+  },
+  {
+    title: "THE CRASH",
+    lines: [
+      "THE MARKET CRASHES 85%",
+      "",
+      "ICP: $150 \u2192 $15",
+      "",
+      "Portfolio: $150,000 \u2192 $22,500",
+      "",
+      "THE EVIL CRYPTO BEAR APPEARS!",
+    ],
+  },
+  {
+    title: "THE BANISHMENT",
+    lines: [
+      '"YOUR BAGS ARE WORTHLESS!"',
+      "         - Evil Crypto Bear",
+      "",
+      "James is banished to the",
+      "SALT MINES OF CONVICTION",
+      "",
+      "Survive 8 years. Reach the",
+      "ICP portal. Escape the mine.",
+    ],
+  },
+];
+
+function drawIntroScreen(
+  ctx: CanvasRenderingContext2D,
+  page: number,
+  frame: number,
+) {
+  ctx.fillStyle = "#0a0a0f";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.fillStyle = "#1a0000";
+  ctx.fillRect(20, 20, CANVAS_W - 40, CANVAS_H - 40);
+  ctx.strokeStyle = "#cc0000";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(20, 20, CANVAS_W - 40, CANVAS_H - 40);
+
+  const data = INTRO_PAGES[page];
+  ctx.font = "bold 16px monospace";
+  ctx.fillStyle = "#ff4444";
+  ctx.textAlign = "center";
+  ctx.fillText(data.title, CANVAS_W / 2, 80);
+
+  ctx.font = "11px monospace";
+  ctx.fillStyle = "#ddd";
+  data.lines.forEach((line, i) => {
+    ctx.fillText(line, CANVAS_W / 2, 140 + i * 22);
+  });
+
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.font = "bold 10px monospace";
+    ctx.fillStyle = "#ffd700";
+    ctx.fillText(
+      page < INTRO_PAGES.length - 1
+        ? "PRESS SPACE TO CONTINUE"
+        : "PRESS SPACE TO BEGIN",
+      CANVAS_W / 2,
+      CANVAS_H - 60,
+    );
+  }
+
+  ctx.fillStyle = "#444";
+  ctx.font = "9px monospace";
+  ctx.fillText(
+    `${page + 1} / ${INTRO_PAGES.length}`,
+    CANVAS_W / 2,
+    CANVAS_H - 30,
+  );
+
+  ctx.textAlign = "left";
+}
+
+function drawYearCompleteScreen(
+  ctx: CanvasRenderingContext2D,
+  level: number,
+  score: number,
+  frame: number,
+) {
+  ctx.fillStyle = "#0a0f0a";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.fillStyle = "#0a2a0a";
+  ctx.fillRect(40, 80, CANVAS_W - 80, CANVAS_H - 160);
+  ctx.strokeStyle = "#4fc3f7";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(40, 80, CANVAS_W - 80, CANVAS_H - 160);
+
+  const glow = 0.7 + Math.sin(frame * 0.08) * 0.25;
+  ctx.save();
+  ctx.shadowColor = "#4fc3f7";
+  ctx.shadowBlur = 15 * glow;
+  ctx.font = "bold 20px monospace";
+  ctx.fillStyle = "#4fc3f7";
+  ctx.textAlign = "center";
+  ctx.fillText(`YEAR ${level + 1} SURVIVED!`, CANVAS_W / 2, 150);
+  ctx.restore();
+
+  const nextPrice = ICP_PRICES[Math.min(level + 1, 7)];
+  const portfolio = nextPrice * 10000;
+
+  ctx.font = "13px monospace";
+  ctx.fillStyle = "#81c784";
+  ctx.textAlign = "center";
+  ctx.fillText(`ICP PRICE RISES TO $${nextPrice}`, CANVAS_W / 2, 210);
+  ctx.fillText(`PORTFOLIO: $${portfolio.toLocaleString()}`, CANVAS_W / 2, 240);
+
+  ctx.font = "11px monospace";
+  ctx.fillStyle = "#ffd700";
+  ctx.fillText(`SCORE: ${score}`, CANVAS_W / 2, 290);
+
+  if (level < 6) {
+    ctx.fillStyle = "#aaa";
+    ctx.font = "10px monospace";
+    ctx.fillText(`${7 - level} years remaining...`, CANVAS_W / 2, 330);
+  } else {
+    ctx.fillStyle = "#ff9800";
+    ctx.font = "bold 11px monospace";
+    ctx.fillText("FINAL YEAR! ESCAPE THE MINE!", CANVAS_W / 2, 330);
+  }
+
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.font = "bold 11px monospace";
+    ctx.fillStyle = "#ffd700";
+    ctx.fillText("PRESS SPACE TO CONTINUE", CANVAS_W / 2, 420);
+  }
+
+  ctx.textAlign = "left";
+}
+
+function drawGameOverScreen(
+  ctx: CanvasRenderingContext2D,
+  score: number,
+  frame: number,
+) {
+  ctx.fillStyle = "#0f0000";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  const shake = Math.sin(frame * 0.3) * 2;
+  ctx.save();
+  ctx.translate(shake, 0);
+  ctx.font = "bold 52px monospace";
+  ctx.fillStyle = "#cc0000";
+  ctx.textAlign = "center";
+  ctx.shadowColor = "#ff0000";
+  ctx.shadowBlur = 20;
+  ctx.fillText("REKT", CANVAS_W / 2, 200);
+  ctx.restore();
+
+  ctx.font = "bold 14px monospace";
+  ctx.fillStyle = "#ff6666";
+  ctx.textAlign = "center";
+  ctx.fillText("YOUR PORTFOLIO IS DUST", CANVAS_W / 2, 280);
+
+  ctx.font = "11px monospace";
+  ctx.fillStyle = "#aaa";
+  ctx.fillText(`FINAL SCORE: ${score}`, CANVAS_W / 2, 330);
+  ctx.fillText("THE BEAR WAS RIGHT.", CANVAS_W / 2, 360);
+  ctx.fillText("(this time)", CANVAS_W / 2, 382);
+
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.font = "bold 11px monospace";
+    ctx.fillStyle = "#ffd700";
+    ctx.fillText("PRESS SPACE TO RETRY", CANVAS_W / 2, 450);
+  }
+  ctx.textAlign = "left";
+}
+
+function drawVictoryScreen(
+  ctx: CanvasRenderingContext2D,
+  score: number,
+  lives: number,
+  frame: number,
+) {
+  ctx.fillStyle = "#000a0a";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Sparkle effects
+  for (let i = 0; i < 20; i++) {
+    const sx = (i * 67 + frame * 2) % CANVAS_W;
+    const sy = (i * 43 + frame * 3) % CANVAS_H;
+    const alpha = 0.3 + Math.sin(frame * 0.1 + i) * 0.25;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "#4fc3f7";
+    ctx.fillRect(sx, sy, 2, 2);
+    ctx.restore();
+  }
+
+  const glow = 0.8 + Math.sin(frame * 0.07) * 0.2;
+  ctx.save();
+  ctx.shadowColor = "#4fc3f7";
+  ctx.shadowBlur = 30 * glow;
+  ctx.font = "bold 18px monospace";
+  ctx.fillStyle = "#4fc3f7";
+  ctx.textAlign = "center";
+  ctx.fillText("DIAMOND HANDS PREVAILED!", CANVAS_W / 2, 120);
+  ctx.restore();
+
+  ctx.font = "bold 13px monospace";
+  ctx.fillStyle = "#ffd700";
+  ctx.textAlign = "center";
+  ctx.fillText("James Salt escapes the Salt Mines!", CANVAS_W / 2, 170);
+
+  ctx.font = "11px monospace";
+  ctx.fillStyle = "#81c784";
+  ctx.fillText("FINAL ICP PRICE: $150.00", CANVAS_W / 2, 220);
+
+  const bonus = 1 + (lives - 1) * 0.15;
+  const finalValue = Math.floor(150 * 10000 * bonus);
+  ctx.fillStyle = "#4fc3f7";
+  ctx.font = "bold 14px monospace";
+  ctx.fillText(
+    `PORTFOLIO VALUE: $${finalValue.toLocaleString()}`,
+    CANVAS_W / 2,
+    260,
+  );
+
+  ctx.fillStyle = "#aaa";
+  ctx.font = "10px monospace";
+  ctx.fillText(`SCORE: ${score}`, CANVAS_W / 2, 300);
+  ctx.fillText(`LIVES REMAINING: ${lives}`, CANVAS_W / 2, 320);
+  ctx.fillText(`PERFORMANCE BONUS: x${bonus.toFixed(2)}`, CANVAS_W / 2, 340);
+
+  ctx.font = "12px monospace";
+  ctx.fillStyle = "#ff9800";
+  ctx.fillText('"Never sold. Never doubted."', CANVAS_W / 2, 390);
+  ctx.fillStyle = "#888";
+  ctx.font = "10px monospace";
+  ctx.fillText("      - James Salt", CANVAS_W / 2, 412);
+
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.font = "bold 11px monospace";
+    ctx.fillStyle = "#ffd700";
+    ctx.fillText("PRESS SPACE TO PLAY AGAIN", CANVAS_W / 2, 490);
+  }
+  ctx.textAlign = "left";
+}
+
+function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  if (gs.screen === "TITLE") {
+    drawTitleScreen(ctx, gs.frameCount);
+    return;
+  }
+  if (gs.screen === "INTRO") {
+    drawIntroScreen(ctx, gs.introPage, gs.frameCount);
+    return;
+  }
+  if (gs.screen === "YEAR_COMPLETE") {
+    drawYearCompleteScreen(ctx, gs.level, gs.score, gs.frameCount);
+    return;
+  }
+  if (gs.screen === "GAME_OVER") {
+    drawGameOverScreen(ctx, gs.score, gs.frameCount);
+    return;
+  }
+  if (gs.screen === "VICTORY") {
+    drawVictoryScreen(ctx, gs.score, gs.lives, gs.frameCount);
+    return;
+  }
+
+  // --- PLAYING ---
+  const level = LEVELS[gs.level];
+
+  drawBackground(ctx, gs.level, gs.frameCount);
+
+  // Platforms (randomly generated each level)
+  for (const plat of gs.currentPlatforms) {
+    drawPlatform(ctx, plat.x, plat.y, plat.w, plat.h);
+  }
+
+  // Exit portal
+  const exit = level.exitPosition;
+  drawExit(ctx, exit.x, exit.y, gs.frameCount);
+
+  // Kool-Aids
+  for (const ka of gs.koolaids) {
+    if (!ka.collected) drawKoolAid(ctx, ka.x, ka.y, gs.frameCount);
+  }
+
+  // Hazards
+  for (const h of gs.hazards) {
+    drawHazard(ctx, h);
+  }
+
+  // Bear
+  const bear = level.bearPosition;
+  drawBear(ctx, bear.x - 20, bear.y - 40, gs.bearArmRaise);
+
+  // Steam particles
+  for (const sp of gs.steamParticles) {
+    ctx.save();
+    ctx.globalAlpha = sp.alpha;
+    ctx.shadowColor = "#ffffff";
+    ctx.shadowBlur = 4;
+    ctx.fillStyle = "#ccddff";
+    ctx.fillRect(sp.x, sp.y, 3, 3);
+    ctx.restore();
+  }
+
+  // Axe pickups
+  for (const ap of gs.axePickups) {
+    if (!ap.collected) drawAxePickup(ctx, ap.x, ap.y, gs.frameCount);
+  }
+
+  // Player
+  drawPlayer(ctx, gs.player, gs.saltMeter, gs.hasAxe);
+
+  // HUD
+  drawHUD(ctx, gs);
+
+  // Bottle warning overlay
+  if (gs.bottleWarningTimer > 0) {
+    const alpha = Math.min(1, gs.bottleWarningTimer / 30);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 60, CANVAS_W, 60);
+    ctx.font = "bold 18px monospace";
+    ctx.fillStyle = "#ff4444";
+    ctx.textAlign = "center";
+    ctx.fillText("COLLECT ALL BLUE BOTTLES FIRST!", CANVAS_W / 2, 95);
+    ctx.restore();
+  }
+
+  // Level complete flash
+  if (gs.levelComplete) {
+    const alpha = Math.min(0.5, (gs.victoryTimer / 90) * 0.5);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "#4fc3f7";
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.restore();
+  }
+}
+
+const TOUCH_BTNS = [
+  { id: "left", dir: "left", x: 10, y: 80, w: 50, h: 50, key: "ArrowLeft" },
+  {
+    id: "right",
+    dir: "right",
+    x: 70,
+    y: 80,
+    w: 50,
+    h: 50,
+    key: "ArrowRight",
+  },
+  { id: "up", dir: "up", x: 40, y: 25, w: 50, h: 50, key: "ArrowUp" },
+  {
+    id: "down",
+    dir: "down",
+    x: 40,
+    y: 135,
+    w: 50,
+    h: 50,
+    key: "ArrowDown",
+  },
+  {
+    id: "jump",
+    dir: "jump",
+    x: 0,
+    y: 50,
+    w: 80,
+    h: 80,
+    key: "Space",
+    right: true,
+  },
+];
+
+// SVG arrow renderer - no selectable text, no iOS copy-paste issues
+function CssArrow({ dir }: { dir: string }) {
+  const paths: Record<string, string> = {
+    left: "M14,2 L2,8 L14,14 Z",
+    right: "M2,2 L14,8 L2,14 Z",
+    up: "M2,14 L8,2 L14,14 Z",
+    down: "M2,2 L8,14 L14,2 Z",
+  };
+  const d = paths[dir];
+  if (!d) return null;
+  return (
+    <svg
+      aria-hidden
+      focusable="false"
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      style={{ display: "block", margin: "auto" }}
+    >
+      <title>{dir}</title>
+      <path d={d} fill="rgba(255,255,255,0.9)" />
+    </svg>
+  );
+}
+
+export default function Game() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const gsRef = useRef<GameState>({
+    screen: "TITLE",
+    introPage: 0,
+    level: 0,
+    lives: 3,
+    score: 0,
+    saltMeter: 0,
+    player: makePlayer(0),
+    hazards: [],
+    koolaids: [],
+    spawnerStates: [],
+    hasAxe: false,
+    axeTimer: 0,
+    axePickups: [],
+    icpModifier: 1.0,
+    debuffTimer: 0,
+    bearThrowTimer: 0,
+    nextHazardId: 1,
+    frameCount: 0,
+    currentPlatforms: [],
+    levelComplete: false,
+    victoryTimer: 0,
+    bearArmRaise: 0,
+    particleTimer: 0,
+    steamParticles: [],
+    keys: new Set(),
+    sfxQueue: [],
+    footstepTimer: 0,
+    bottleWarningTimer: 0,
+  });
+  const rafRef = useRef<number>(0);
+  const [gamepadConnected, setGamepadConnected] = useState(false);
+  const gamepadIndexRef = useRef<number>(-1);
+  const [hasAxeDisplay, setHasAxeDisplay] = useState(false);
+  const hasAxeDisplayRef = useRef(false);
+  const prevBtnARef = useRef(false);
+  const sfxRef = useRef<{ play: (e: string) => void } | null>(null);
+  const sfxAudioCtxRef = useRef<AudioContext | null>(null);
+  const [sfxMuted, setSfxMuted] = useState(false);
+  const [sfxVolume, setSfxVolume] = useState(0.5);
+  const sfxVolumeRef = useRef(0.5);
+  const sfxMutedRef = useRef(false);
+  const musicRef = useRef<HTMLAudioElement | null>(null);
+  const musicStartedRef = useRef(false);
+  const [musicMuted, setMusicMuted] = useState(false);
+  const musicMutedRef = useRef(false);
+
+  const toggleMusicMute = useCallback(() => {
+    setMusicMuted((prev) => {
+      const next = !prev;
+      musicMutedRef.current = next;
+      if (musicRef.current) musicRef.current.muted = next;
+      return next;
+    });
+  }, []);
+
+  // Eagerly create and load the audio so iOS has it buffered before gesture
+  useEffect(() => {
+    const audio = new Audio(
+      "/assets/uploads/neon-in-my-veins-019d32fe-e0e6-746b-8a8c-ba6c4cb124f1-1.mp3",
+    );
+    audio.loop = true;
+    audio.volume = 0.4;
+    audio.muted = false;
+    audio.preload = "auto";
+    audio.load();
+    audio.play().catch(() => {});
+    musicRef.current = audio;
+
+    // One-shot global unlock: fire play() synchronously inside the first touchstart/click
+    const unlock = () => {
+      if (musicStartedRef.current) return;
+      musicStartedRef.current = true;
+      audio.play().catch(() => {
+        /* still blocked – user can tap music button */
+      });
+      document.removeEventListener("touchstart", unlock, true);
+      document.removeEventListener("click", unlock, true);
+      document.removeEventListener("keydown", unlock, true);
+    };
+    document.addEventListener("touchstart", unlock, true);
+    document.addEventListener("click", unlock, true);
+    document.addEventListener("keydown", unlock, true);
+
+    return () => {
+      document.removeEventListener("touchstart", unlock, true);
+      document.removeEventListener("click", unlock, true);
+      document.removeEventListener("keydown", unlock, true);
+      audio.pause();
+      musicRef.current = null;
+    };
+  }, []);
+
+  const startMusic = useCallback(() => {
+    const audio = musicRef.current;
+    if (!audio || musicStartedRef.current) return;
+    musicStartedRef.current = true;
+    audio.muted = false;
+    musicMutedRef.current = false;
+    setMusicMuted(false);
+    audio.play().catch(() => {
+      /* blocked */
+    });
+  }, []);
+
+  const toggleSfxMute = useCallback(() => {
+    setSfxMuted((prev) => {
+      const next = !prev;
+      sfxMutedRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const handleSfxVolume = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const v = Number.parseFloat(e.target.value);
+      setSfxVolume(v);
+      sfxVolumeRef.current = v;
+    },
+    [],
+  );
+
+  const resetGame = useCallback(() => {
+    const gs = gsRef.current;
+    gs.screen = "TITLE";
+    gs.introPage = 0;
+    gs.level = 0;
+    gs.lives = 3;
+    gs.score = 0;
+    gs.saltMeter = 0;
+    gs.hazards = [];
+    gs.koolaids = [];
+    gs.spawnerStates = [];
+    gs.hasAxe = false;
+    gs.axeTimer = 0;
+    gs.axePickups = [];
+    gs.icpModifier = 1.0;
+    gs.debuffTimer = 0;
+    gs.bearThrowTimer = 0;
+    gs.currentPlatforms = [];
+    gs.frameCount = 0;
+    gs.steamParticles = [];
+    gs.keys = new Set();
+    gs.sfxQueue = [];
+    gs.footstepTimer = 0;
+  }, []);
+
+  const handleSpace = useCallback(() => {
+    const gs = gsRef.current;
+    if (gs.screen === "TITLE") {
+      gs.screen = "INTRO";
+      gs.introPage = 0;
+      gs.frameCount = 0;
+    } else if (gs.screen === "INTRO") {
+      gs.introPage++;
+      if (gs.introPage >= INTRO_PAGES.length) {
+        gs.screen = "PLAYING";
+        initLevel(gs, 0);
+      }
+      gs.frameCount = 0;
+    } else if (gs.screen === "YEAR_COMPLETE") {
+      gs.level++;
+      gs.screen = "PLAYING";
+      initLevel(gs, gs.level);
+    } else if (gs.screen === "GAME_OVER") {
+      resetGame();
+    } else if (gs.screen === "VICTORY") {
+      resetGame();
+    }
+  }, [resetGame]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Initialize AudioContext on first gesture
+      if (!sfxAudioCtxRef.current) {
+        try {
+          sfxAudioCtxRef.current = new AudioContext();
+          sfxRef.current = createSFX(sfxAudioCtxRef.current, () =>
+            sfxMutedRef.current ? 0 : sfxVolumeRef.current,
+          );
+        } catch (_e) {
+          /* ignore */
+        }
+      }
+      // Start background music on first gesture
+      startMusic();
+      gsRef.current.keys.add(e.code);
+      if (e.code === "Space" || e.code === "KeyZ") {
+        if (
+          ["TITLE", "INTRO", "YEAR_COMPLETE", "GAME_OVER", "VICTORY"].includes(
+            gsRef.current.screen,
+          )
+        ) {
+          handleSpace();
+        }
+        e.preventDefault();
+      }
+      if (
+        ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.code)
+      ) {
+        e.preventDefault();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      gsRef.current.keys.delete(e.code);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [handleSpace, startMusic]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+
+    let last = 0;
+    function loop(ts: number) {
+      const dt = Math.min((ts - last) / 16.67, 2);
+      last = ts;
+      // Gamepad polling
+      const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const gp =
+        gamepadIndexRef.current >= 0 ? gamepads[gamepadIndexRef.current] : null;
+      if (gp) {
+        const gs = gsRef.current;
+        const axisX = gp.axes[0] ?? 0;
+        const axisY = gp.axes[1] ?? 0;
+        const dLeft = gp.buttons[14]?.pressed || axisX < -0.5;
+        const dRight = gp.buttons[15]?.pressed || axisX > 0.5;
+        const dUp = gp.buttons[12]?.pressed || axisY < -0.5;
+        const dDown = gp.buttons[13]?.pressed || axisY > 0.5;
+        const btnA = gp.buttons[0]?.pressed ?? false;
+        const btnB = gp.buttons[1]?.pressed ?? false;
+        if (dLeft) gs.keys.add("ArrowLeft");
+        else gs.keys.delete("ArrowLeft");
+        if (dRight) gs.keys.add("ArrowRight");
+        else gs.keys.delete("ArrowRight");
+        if (dUp) gs.keys.add("ArrowUp");
+        else gs.keys.delete("ArrowUp");
+        if (dDown) gs.keys.add("ArrowDown");
+        else gs.keys.delete("ArrowDown");
+        if (btnA) gs.keys.add("Space");
+        else gs.keys.delete("Space");
+        if (btnB) gs.keys.add("AxeSmash");
+        else gs.keys.delete("AxeSmash");
+        // Rising edge of A: advance screen
+        if (btnA && !prevBtnARef.current) {
+          if (
+            [
+              "TITLE",
+              "INTRO",
+              "YEAR_COMPLETE",
+              "GAME_OVER",
+              "VICTORY",
+            ].includes(gs.screen)
+          ) {
+            handleSpace();
+          }
+        }
+        prevBtnARef.current = btnA;
+      }
+      updateGame(gsRef.current, dt);
+      const gs = gsRef.current;
+      if (gs.sfxQueue.length > 0) {
+        if (!sfxAudioCtxRef.current) {
+          try {
+            sfxAudioCtxRef.current = new AudioContext();
+            sfxRef.current = createSFX(sfxAudioCtxRef.current, () =>
+              sfxMutedRef.current ? 0 : sfxVolumeRef.current,
+            );
+          } catch (_e) {
+            /* ignore */
+          }
+        }
+        if (sfxRef.current) {
+          for (const e of gs.sfxQueue) {
+            sfxRef.current!.play(e);
+          }
+        }
+        gs.sfxQueue = [];
+      }
+      renderGame(ctx, gs);
+      // Sync hasAxeDisplay state without thrashing renders
+      if (gs.hasAxe !== hasAxeDisplayRef.current) {
+        hasAxeDisplayRef.current = gs.hasAxe;
+        setHasAxeDisplay(gs.hasAxe);
+      }
+      rafRef.current = requestAnimationFrame(loop);
+    }
+    rafRef.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [handleSpace]);
+
+  // Gamepad connection listeners
+  useEffect(() => {
+    const onConnect = (e: GamepadEvent) => {
+      setGamepadConnected(true);
+      gamepadIndexRef.current = e.gamepad.index;
+    };
+    const onDisconnect = () => {
+      setGamepadConnected(false);
+      gamepadIndexRef.current = -1;
+      // Clear gamepad keys on disconnect
+      const gs = gsRef.current;
+      gs.keys.delete("ArrowLeft");
+      gs.keys.delete("ArrowRight");
+      gs.keys.delete("ArrowUp");
+      gs.keys.delete("ArrowDown");
+      gs.keys.delete("Space");
+      gs.keys.delete("AxeSmash");
+    };
+    window.addEventListener("gamepadconnected", onConnect);
+    window.addEventListener("gamepaddisconnected", onDisconnect);
+    return () => {
+      window.removeEventListener("gamepadconnected", onConnect);
+      window.removeEventListener("gamepaddisconnected", onDisconnect);
+    };
+  }, []);
+
+  // Touch handlers
+  // touchActive unused
+
+  const onTouchBtn = useCallback(
+    (key: string, active: boolean) => {
+      const gs = gsRef.current;
+      if (active) {
+        gs.keys.add(key);
+        if (key === "Space") {
+          if (
+            [
+              "TITLE",
+              "INTRO",
+              "YEAR_COMPLETE",
+              "GAME_OVER",
+              "VICTORY",
+            ].includes(gs.screen)
+          ) {
+            handleSpace();
+          }
+        }
+      } else {
+        gs.keys.delete(key);
+      }
+    },
+    [handleSpace],
+  );
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        width: "100vw",
+        height: "100vh",
+        background: "#000",
+        overflow: "hidden",
+        position: "relative",
+      }}
+    >
+      <div style={{ position: "relative", display: "inline-block" }}>
+        <canvas
+          ref={canvasRef}
+          width={CANVAS_W}
+          height={CANVAS_H}
+          data-ocid="game.canvas_target"
+          style={{
+            imageRendering: "pixelated",
+            display: "block",
+            maxWidth: "100vw",
+            maxHeight: "100vh",
+            width: "auto",
+            height: "auto",
+          }}
+        />
+        {/* Touch controls overlay */}
+        {!gamepadConnected && (
+          <div
+            style={{
+              position: "absolute",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: "220px",
+              pointerEvents: "none",
+            }}
+          >
+            {/* Left d-pad */}
+            <div
+              style={{
+                position: "absolute",
+                left: 12,
+                bottom: 12,
+                width: 130,
+                height: 200,
+                pointerEvents: "auto",
+              }}
+            >
+              {TOUCH_BTNS.filter((b) => !b.right).map((btn) => (
+                <button
+                  type="button"
+                  key={btn.id}
+                  data-ocid={`controls.${btn.id}_button`}
+                  onTouchStart={(e) => {
+                    e.preventDefault();
+                    startMusic();
+                    onTouchBtn(btn.key, true);
+                  }}
+                  onTouchEnd={(e) => {
+                    e.preventDefault();
+                    onTouchBtn(btn.key, false);
+                  }}
+                  onMouseDown={() => onTouchBtn(btn.key, true)}
+                  onMouseUp={() => onTouchBtn(btn.key, false)}
+                  style={{
+                    position: "absolute",
+                    left: btn.x,
+                    top: btn.y,
+                    width: btn.w,
+                    height: btn.h,
+                    background: "rgba(255,255,255,0.15)",
+                    border: "2px solid rgba(255,255,255,0.3)",
+                    borderRadius: 8,
+                    color: "#fff",
+                    fontSize: 18,
+                    cursor: "pointer",
+                    userSelect: "none",
+                    touchAction: "none",
+                    WebkitUserSelect: "none",
+                    WebkitTouchCallout: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <CssArrow dir={btn.dir} />
+                </button>
+              ))}
+            </div>
+            {/* Jump button */}
+            <button
+              type="button"
+              data-ocid="controls.jump_button"
+              onTouchStart={(e) => {
+                e.preventDefault();
+                startMusic();
+                onTouchBtn("Space", true);
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onTouchBtn("Space", false);
+              }}
+              onMouseDown={() => onTouchBtn("Space", true)}
+              onMouseUp={() => onTouchBtn("Space", false)}
+              style={{
+                position: "absolute",
+                right: 20,
+                bottom: 20,
+                width: 80,
+                height: 80,
+                background: "rgba(79,195,247,0.25)",
+                border: "2px solid rgba(79,195,247,0.5)",
+                borderRadius: "50%",
+                color: "#4fc3f7",
+                fontSize: 14,
+                fontWeight: "bold",
+                cursor: "pointer",
+                userSelect: "none",
+                touchAction: "none",
+                pointerEvents: "auto",
+                WebkitUserSelect: "none",
+                WebkitTouchCallout: "none",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 3,
+              }}
+              aria-label="Jump"
+            >
+              {/* CSS arrow up for jump */}
+              <span
+                aria-hidden
+                style={{
+                  display: "block",
+                  width: 0,
+                  height: 0,
+                  borderLeft: "10px solid transparent",
+                  borderRight: "10px solid transparent",
+                  borderBottom: "14px solid rgba(79,195,247,0.9)",
+                }}
+              />
+              <span
+                aria-hidden
+                style={{
+                  display: "block",
+                  width: 16,
+                  height: 3,
+                  background: "rgba(79,195,247,0.7)",
+                  borderRadius: 2,
+                }}
+              />
+            </button>
+            {/* B / Axe Smash button */}
+            <button
+              type="button"
+              data-ocid="controls.axe_button"
+              onTouchStart={(e) => {
+                e.preventDefault();
+                startMusic();
+                onTouchBtn("AxeSmash", true);
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onTouchBtn("AxeSmash", false);
+              }}
+              onMouseDown={() => onTouchBtn("AxeSmash", true)}
+              onMouseUp={() => onTouchBtn("AxeSmash", false)}
+              style={{
+                position: "absolute",
+                right: 20,
+                bottom: 115,
+                width: 80,
+                height: 80,
+                background: hasAxeDisplay
+                  ? "rgba(255,200,50,0.25)"
+                  : "rgba(255,255,255,0.1)",
+                border: `2px solid ${hasAxeDisplay ? "rgba(255,200,50,0.5)" : "rgba(255,255,255,0.2)"}`,
+                borderRadius: "50%",
+                color: hasAxeDisplay ? "#ffc832" : "rgba(255,255,255,0.4)",
+                fontSize: 22,
+                fontWeight: "bold",
+                cursor: "pointer",
+                userSelect: "none",
+                touchAction: "none",
+                pointerEvents: "auto",
+                WebkitUserSelect: "none",
+                WebkitTouchCallout: "none",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 2,
+              }}
+              aria-label="Axe Smash"
+            >
+              <span aria-hidden style={{ fontSize: 24, lineHeight: 1 }}>
+                ⛏️
+              </span>
+              <span aria-hidden style={{ fontSize: 10, letterSpacing: 1 }}>
+                B
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
+      {/* Music controls */}
+      <div
+        style={{
+          position: "absolute",
+          top: 10,
+          right: 106,
+          display: "flex",
+          alignItems: "center",
+          zIndex: 10,
+        }}
+      >
+        <button
+          type="button"
+          data-ocid="music.toggle"
+          onTouchStart={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (!musicStartedRef.current) {
+              startMusic();
+            } else {
+              toggleMusicMute();
+            }
+          }}
+          onClick={() => {
+            if (!musicStartedRef.current) {
+              startMusic();
+            } else {
+              toggleMusicMute();
+            }
+          }}
+          title={musicMuted ? "Unmute Music" : "Mute Music"}
+          aria-label={musicMuted ? "Unmute Music" : "Mute Music"}
+          style={{
+            width: 40,
+            height: 40,
+            background: "rgba(0,0,0,0.6)",
+            border: "2px solid rgba(255,255,255,0.3)",
+            borderRadius: 8,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 22 22"
+            fill="none"
+            aria-hidden="true"
+            role="presentation"
+          >
+            {musicMuted ? (
+              <>
+                <path
+                  d="M9 6L9 16L14 13L14 9L9 6Z"
+                  stroke="rgba(255,255,255,0.45)"
+                  strokeWidth="1.6"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M6 8L16 14"
+                  stroke="rgba(255,255,255,0.45)"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+              </>
+            ) : (
+              <>
+                <path
+                  d="M9 6L9 16L14 13L14 9L9 6Z"
+                  stroke="white"
+                  strokeWidth="1.6"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M16 8C17.1 9.1 17.1 12.9 16 14"
+                  stroke="white"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M14 9H18"
+                  stroke="white"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+              </>
+            )}
+          </svg>
+        </button>
+      </div>
+      {/* SFX controls */}
+      <div
+        style={{
+          position: "absolute",
+          top: 10,
+          right: 58,
+          display: "flex",
+          flexDirection: "row",
+          gap: 4,
+          alignItems: "center",
+          zIndex: 10,
+        }}
+      >
+        {!sfxMuted && (
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={sfxVolume}
+            onChange={handleSfxVolume}
+            data-ocid="sfx.select"
+            title="SFX volume"
+            style={{
+              width: 60,
+              height: 4,
+              accentColor: "#4fc3f7",
+              cursor: "pointer",
+            }}
+          />
+        )}
+        <button
+          type="button"
+          data-ocid="sfx.toggle"
+          onClick={() => {
+            if (!sfxAudioCtxRef.current) {
+              try {
+                sfxAudioCtxRef.current = new AudioContext();
+                sfxRef.current = createSFX(sfxAudioCtxRef.current, () =>
+                  sfxMutedRef.current ? 0 : sfxVolumeRef.current,
+                );
+              } catch (_e) {
+                /* ignore */
+              }
+            }
+            toggleSfxMute();
+          }}
+          title={sfxMuted ? "Unmute SFX" : "Mute SFX"}
+          aria-label={sfxMuted ? "Unmute SFX" : "Mute SFX"}
+          style={{
+            width: 40,
+            height: 40,
+            background: "rgba(0,0,0,0.6)",
+            border: "2px solid rgba(255,255,255,0.3)",
+            borderRadius: 8,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 22 22"
+            fill="none"
+            aria-hidden="true"
+            role="presentation"
+          >
+            {sfxMuted ? (
+              <>
+                <circle
+                  cx="11"
+                  cy="11"
+                  r="7"
+                  stroke="rgba(255,255,255,0.5)"
+                  strokeWidth="1.8"
+                />
+                <path
+                  d="M8 8L14 14M14 8L8 14"
+                  stroke="rgba(255,255,255,0.5)"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </>
+            ) : (
+              <>
+                <circle
+                  cx="11"
+                  cy="11"
+                  r="7"
+                  stroke="white"
+                  strokeWidth="1.8"
+                />
+                <path
+                  d="M9 8V14M11 7V15M13 9V13"
+                  stroke="white"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </>
+            )}
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
