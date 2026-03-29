@@ -24,7 +24,7 @@ interface Player {
   vy: number;
   onGround: boolean;
   facing: 1 | -1;
-  state: "idle" | "run" | "jump" | "hit" | "victory" | "attacking";
+  state: "idle" | "run" | "jump" | "hit" | "victory" | "attacking" | "dying";
   hitTimer: number;
   attackTimer: number;
   attackClangPlayed: boolean;
@@ -102,6 +102,12 @@ interface GameState {
   sfxQueue: string[];
   footstepTimer: number;
   bottleWarningTimer: number;
+  bearThrowAnim: number;
+  levelTransitionAlpha: number;
+  dyingTimer: number;
+  bearX: number;
+  bearDir: number;
+  bearWalkFrame: number;
 }
 
 const PLAYER_W = 24;
@@ -146,15 +152,21 @@ function initLevel(gs: GameState, levelIdx: number) {
   gs.sfxQueue = [];
   gs.footstepTimer = 0;
   gs.bottleWarningTimer = 0;
+  gs.bearThrowAnim = 0;
+  gs.levelTransitionAlpha = 1.0;
+  gs.dyingTimer = 0;
+  gs.bearX = 200;
+  gs.bearDir = 1;
+  gs.bearWalkFrame = 0;
 
   // Generate random platforms for this level run
   gs.currentPlatforms = generateRandomPlatforms(levelIdx);
 
   // Place kool-aid bottles randomly on platforms
   const placementPlats = gs.currentPlatforms.filter(
-    (p) => p.y < CANVAS_H - 50 && p.y > CANVAS_H - 560 && p.w > 40,
+    (p) => p.y < CANVAS_H - 30 && p.w > 20,
   );
-  const numBottles = Math.max(2, 4 - Math.floor(levelIdx / 3));
+  const numBottles = 2 + levelIdx; // grows from 2 (level 1) to 9 (level 8)
   gs.koolaids = [];
   const usedPlats = new Set<number>();
   for (let i = 0; i < numBottles && i < placementPlats.length; i++) {
@@ -208,7 +220,41 @@ function rectOverlap(
 
 function updateGame(gs: GameState, _dt: number) {
   if (gs.screen !== "PLAYING") return;
+
+  // Dying animation sequence
+  if (gs.dyingTimer > 0) {
+    gs.dyingTimer--;
+    if (gs.dyingTimer === 0) {
+      initLevel(gs, gs.level);
+    }
+    return;
+  }
+
+  // Level transition fade
+  if (gs.levelTransitionAlpha > 0) {
+    gs.levelTransitionAlpha = Math.max(0, gs.levelTransitionAlpha - 0.025);
+  }
+
+  // Bear throw animation countdown
+  if (gs.bearThrowAnim > 0) gs.bearThrowAnim--;
   gs.frameCount++;
+
+  // Bear walking across top platform
+  const BEAR_PLATFORM_LEFT = 75;
+  const BEAR_PLATFORM_RIGHT = 395;
+  if (gs.bearThrowAnim === 0) {
+    gs.bearX += gs.bearDir * 0.67;
+    gs.bearWalkFrame++;
+    if (gs.bearX <= BEAR_PLATFORM_LEFT) {
+      gs.bearX = BEAR_PLATFORM_LEFT;
+      gs.bearDir = 1;
+    } else if (gs.bearX >= BEAR_PLATFORM_RIGHT) {
+      gs.bearX = BEAR_PLATFORM_RIGHT;
+      gs.bearDir = -1;
+    }
+  } else {
+    gs.bearWalkFrame = 0;
+  }
   if (gs.bottleWarningTimer > 0) gs.bottleWarningTimer--;
   const level = LEVELS[gs.level];
   const p = gs.player;
@@ -358,12 +404,13 @@ function updateGame(gs: GameState, _dt: number) {
   }
 
   // Bear throw system - all hazards thrown from bear position
-  const bearThrowInterval = Math.max(50, 120 - gs.level * 8);
+  const bearThrowInterval = Math.max(30, 120 - gs.level * 12);
   gs.bearThrowTimer++;
   if (gs.bearThrowTimer >= bearThrowInterval) {
     gs.bearThrowTimer = 0;
+    gs.bearThrowAnim = 35;
     gs.sfxQueue.push("bear_throw");
-    const bearCx = level.bearPosition.x + 20;
+    const bearCx = gs.bearX + 21;
     const bearCy = level.bearPosition.y;
 
     const roll = Math.random();
@@ -427,7 +474,7 @@ function updateGame(gs: GameState, _dt: number) {
                     : 18;
 
     const throwDir = Math.random() < 0.5 ? -1 : 1;
-    const throwVx = throwDir * (1.2 + Math.random() * 1.0 + gs.level * 0.1);
+    const throwVx = throwDir * (1.5 + Math.random() * 1.0 + gs.level * 0.2);
 
     gs.hazards.push({
       id: gs.nextHazardId++,
@@ -470,7 +517,7 @@ function updateGame(gs: GameState, _dt: number) {
             h.onGround = true;
             // Only randomize direction when FIRST landing on a new platform
             if (!h.wasOnGround) {
-              const rollSpeed = Math.max(Math.abs(h.vx), 2.0 + gs.level * 0.15);
+              const rollSpeed = Math.max(Math.abs(h.vx), 2.2 + gs.level * 0.3);
               h.vx = (Math.random() < 0.5 ? -1 : 1) * rollSpeed;
             }
             // Maintain rolling speed while on ground (don't let friction stop it)
@@ -556,8 +603,8 @@ function updateGame(gs: GameState, _dt: number) {
         continue;
       }
 
-      // Axe smashes other hazards
-      if (gs.hasAxe && p.hitTimer === 0) {
+      // Axe smashes other hazards ONLY when actively swinging
+      if (gs.hasAxe && p.attackTimer > 0 && p.hitTimer === 0) {
         gs.score += 150;
         gs.sfxQueue.push("axe_swing");
         toRemove.push(i);
@@ -691,7 +738,8 @@ function loseLife(gs: GameState) {
     gs.screen = "GAME_OVER";
   } else {
     gs.sfxQueue.push("lose_life");
-    initLevel(gs, gs.level);
+    gs.dyingTimer = 80;
+    gs.player.state = "dying";
   }
 }
 
@@ -702,6 +750,8 @@ function drawPlayer(
   p: Player,
   saltMeter: number,
   hasAxe: boolean,
+  axeTimer = 600,
+  dyingTimer = 0,
 ) {
   const { x, y, facing, state, hitTimer, frame } = p;
   const flipped = facing === -1;
@@ -712,6 +762,18 @@ function drawPlayer(
     ctx.scale(-1, 1);
   } else {
     ctx.translate(x, y);
+  }
+
+  // Dying animation
+  if (state === "dying" && dyingTimer > 0) {
+    const progress = (80 - dyingTimer) / 80;
+    const spin = progress * Math.PI * 3;
+    const fallOffset = progress * progress * 60;
+    ctx.globalAlpha = 1 - progress * 0.6;
+    // We're already translated to (x,y) or flipped - apply spin around center
+    ctx.translate(p.w / 2, p.h / 2 + fallOffset);
+    ctx.rotate(spin);
+    ctx.translate(-p.w / 2, -p.h / 2);
   }
 
   // Hit flash
@@ -971,6 +1033,11 @@ function drawPlayer(
     ctx.shadowBlur = 0;
     ctx.restore();
   } else if (hasAxe) {
+    const shouldShowAxe = axeTimer > 120 || Math.floor(axeTimer / 10) % 2 === 0;
+    if (!shouldShowAxe) {
+      ctx.restore();
+      return;
+    }
     ctx.save();
     ctx.shadowColor = "#ffd700";
     ctx.shadowBlur = 8;
@@ -1002,6 +1069,8 @@ function drawBear(
   bx: number,
   by: number,
   armRaise: number,
+  throwAnim = 0,
+  walkFrame = 0,
 ) {
   ctx.save();
   ctx.translate(bx, by);
@@ -1028,28 +1097,64 @@ function drawBear(
     ctx.fillRect(9 + fi * 5, 43, 3, 2);
   }
 
-  // Legs
-  ctx.fillStyle = "#6B0000";
-  ctx.fillRect(9, 40, 10, 8);
-  ctx.fillRect(23, 40, 10, 8);
-  // Paws
-  ctx.fillStyle = "#8B0000";
-  ctx.fillRect(8, 46, 12, 4);
-  ctx.fillRect(22, 46, 12, 4);
+  // Legs (animated when walking)
+  if (walkFrame > 0 && throwAnim === 0) {
+    const legSwing = Math.sin(walkFrame * 0.25) * 7;
+    ctx.fillStyle = "#6B0000";
+    ctx.fillRect(9, 40 - legSwing, 10, 8);
+    ctx.fillRect(23, 40 + legSwing, 10, 8);
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(8, 47 - legSwing, 12, 4);
+    ctx.fillRect(22, 47 + legSwing, 12, 4);
+  } else {
+    ctx.fillStyle = "#6B0000";
+    ctx.fillRect(9, 40, 10, 8);
+    ctx.fillRect(23, 40, 10, 8);
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(8, 46, 12, 4);
+    ctx.fillRect(22, 46, 12, 4);
+  }
 
   // Arms with animation
-  const raiseL = Math.sin(armRaise) * 8;
-  const raiseR = Math.sin(armRaise + Math.PI) * 6;
-  ctx.fillStyle = "#6B0000";
-  // Left arm
-  ctx.fillRect(-2, 16 + raiseL, 10, 16);
-  ctx.fillStyle = "#8B0000";
-  ctx.fillRect(-3, 24 + raiseL, 6, 8); // fist
-  // Right arm
-  ctx.fillStyle = "#6B0000";
-  ctx.fillRect(34, 16 + raiseR, 10, 16);
-  ctx.fillStyle = "#8B0000";
-  ctx.fillRect(35, 24 + raiseR, 6, 8); // fist
+  if (throwAnim > 0) {
+    // Throw pose: both arms thrust forward/upward
+    const throwProgress = throwAnim / 35;
+    const armExt = throwProgress * -14; // arms raised up
+    // Body lean forward
+    ctx.save();
+    ctx.translate(2 * throwProgress, 0);
+    ctx.fillStyle = "#6B0000";
+    ctx.fillRect(-4, 16 + armExt, 12, 14);
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(-6, 14 + armExt, 8, 8);
+    ctx.fillStyle = "#6B0000";
+    ctx.fillRect(34, 16 + armExt, 12, 14);
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(36, 14 + armExt, 8, 8);
+    ctx.restore();
+    // Motion lines
+    ctx.strokeStyle = "rgba(255,200,0,0.6)";
+    ctx.lineWidth = 1.5;
+    for (let ml = 0; ml < 3; ml++) {
+      ctx.beginPath();
+      ctx.moveTo(38 + ml * 4, 10 + armExt - ml * 3);
+      ctx.lineTo(50 + ml * 4, 6 + armExt - ml * 3);
+      ctx.stroke();
+    }
+  } else {
+    const raiseL = Math.sin(armRaise) * 8;
+    const raiseR = Math.sin(armRaise + Math.PI) * 6;
+    ctx.fillStyle = "#6B0000";
+    // Left arm
+    ctx.fillRect(-2, 16 + raiseL, 10, 16);
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(-3, 24 + raiseL, 6, 8); // fist
+    // Right arm
+    ctx.fillStyle = "#6B0000";
+    ctx.fillRect(34, 16 + raiseR, 10, 16);
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(35, 24 + raiseR, 6, 8); // fist
+  }
 
   // Foam/spittle when arm raised
   if (Math.sin(armRaise) > 0.3) {
@@ -1399,17 +1504,20 @@ function drawPlatform(
   y: number,
   w: number,
   h: number,
+  tint?: string,
 ) {
+  const bodyColor = tint || "#2a1f0e";
+  const topColor = tint ? `${tint}cc` : "#4a3520";
   // Drop shadow
   ctx.fillStyle = "rgba(0,0,0,0.5)";
   ctx.fillRect(x + 3, y + h + 2, w, 4);
 
   // Body
-  ctx.fillStyle = "#2a1f0e";
+  ctx.fillStyle = bodyColor;
   ctx.fillRect(x, y, w, h);
 
   // Top surface
-  ctx.fillStyle = "#4a3520";
+  ctx.fillStyle = topColor;
   ctx.fillRect(x, y, w, h - 2);
 
   // Plank grain lines
@@ -1460,66 +1568,70 @@ function drawExit(
   y: number,
   frame: number,
 ) {
-  const pulse = 0.6 + Math.sin(frame * 0.08) * 0.3;
+  // Green stock-market candle door portal
+  const glow = 0.7 + Math.sin(frame * 0.06) * 0.28;
   ctx.save();
 
   // Outer glow halo
-  ctx.shadowColor = "#4fc3f7";
-  ctx.shadowBlur = 20 * pulse;
-  ctx.globalAlpha = pulse * 0.4;
-  ctx.fillStyle = "#0a2a6a";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 30, 38, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.globalAlpha = 1;
+  ctx.shadowColor = "#00C853";
+  ctx.shadowBlur = 28 * glow;
 
-  // Outer ellipse
-  ctx.fillStyle = "#0a2a6a";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 26, 33, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Mid ellipse
-  ctx.fillStyle = "#1565c0";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 20, 27, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Inner teal ellipse
-  ctx.fillStyle = "#4fc3f7";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 14, 20, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Swirl lines
-  ctx.strokeStyle = "rgba(255,255,255,0.6)";
-  ctx.lineWidth = 1.5;
-  for (let s = 0; s < 5; s++) {
-    const angle = frame * 0.04 + (s * Math.PI * 2) / 5;
-    ctx.beginPath();
-    ctx.arc(x, y, 10 + s * 2, angle, angle + 1.2);
-    ctx.stroke();
-  }
-
-  // Pulsing outer ring
-  ctx.globalAlpha = 0.3 + Math.sin(frame * 0.1) * 0.25;
-  ctx.strokeStyle = "#4fc3f7";
+  // Upper wick
+  ctx.strokeStyle = "#888888";
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.ellipse(x, y, 28, 36, 0, 0, Math.PI * 2);
+  ctx.moveTo(x + 9, y - 50);
+  ctx.lineTo(x + 9, y - 64);
   ctx.stroke();
-  ctx.globalAlpha = 1;
 
-  // ICP text
-  ctx.shadowColor = "#ffffff";
-  ctx.shadowBlur = 6;
-  ctx.font = "bold 8px monospace";
-  ctx.fillStyle = "#ffffff";
-  ctx.textAlign = "center";
-  ctx.fillText("ICP", x, y + 3);
+  // Flame at top of wick
+  ctx.shadowColor = "#ffcc00";
+  ctx.shadowBlur = 14;
+  const flameY = y - 66 + Math.sin(frame * 0.15) * 2;
+  ctx.fillStyle = "#ffdd00";
+  ctx.fillRect(x + 6, flameY, 7, 8);
+  ctx.fillStyle = "#ff8800";
+  ctx.fillRect(x + 7, flameY + 1, 5, 6);
+  ctx.fillStyle = "#ffffaa";
+  ctx.fillRect(x + 8, flameY + 2, 3, 3);
+
+  // Candle body (tall green rectangle - bullish!)
+  ctx.shadowColor = "#00C853";
+  ctx.shadowBlur = 20 * glow;
+  ctx.fillStyle = "#00C853";
+  ctx.fillRect(x, y - 50, 18, 50);
+
+  // Candle body highlight (left edge lighter)
+  ctx.fillStyle = "#4cff8c";
+  ctx.fillRect(x + 1, y - 48, 4, 46);
+
+  // Candle price lines (stock chart style)
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect(x, y - 34, 18, 2);
+  ctx.fillRect(x, y - 18, 18, 2);
+
+  // Dark edge shading
+  ctx.fillStyle = "#007a32";
+  ctx.fillRect(x + 14, y - 50, 4, 50);
+
+  // Lower wick
   ctx.shadowBlur = 0;
+  ctx.strokeStyle = "#888888";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x + 9, y);
+  ctx.lineTo(x + 9, y + 10);
+  ctx.stroke();
+
+  // EXIT label below
+  ctx.shadowColor = "#00C853";
+  ctx.shadowBlur = 8 * glow;
+  ctx.font = "bold 8px monospace";
+  ctx.fillStyle = "#00ff88";
+  ctx.textAlign = "center";
+  ctx.fillText("EXIT", x + 9, y + 22);
   ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
   ctx.restore();
 }
 
@@ -1608,15 +1720,16 @@ function drawAxePickup(
 
 function drawBackground(
   ctx: CanvasRenderingContext2D,
-  _level: number,
+  level: number,
   frame: number,
 ) {
+  const palette = LEVEL_PALETTES[level % LEVEL_PALETTES.length];
   // === LAYER 1: Deep background - stone block grid ===
-  ctx.fillStyle = "#080810";
+  ctx.fillStyle = palette.bg1;
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
   // Stone block grid
-  ctx.fillStyle = "#0e0e1c";
+  ctx.fillStyle = palette.bg2;
   for (let gy = 0; gy < CANVAS_H; gy += 32) {
     for (let gx = 0; gx < CANVAS_W; gx += 40) {
       const offset = (Math.floor(gy / 32) % 2) * 20;
@@ -1807,15 +1920,9 @@ function drawBackground(
   for (let sy = 0; sy < CANVAS_H; sy += 2) {
     ctx.fillRect(0, sy, CANVAS_W, 1);
   }
-
-  // HUD background panel
-  ctx.fillStyle = "#0a0a18";
-  ctx.fillRect(0, 0, CANVAS_W, 52);
-  ctx.fillStyle = "#4fc3f7";
-  ctx.fillRect(0, 50, CANVAS_W, 2);
 }
 
-function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
+function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
   const level = gs.level;
   const price = ICP_PRICES[level] * gs.icpModifier;
   const portfolio = price * 10000;
@@ -1947,7 +2054,9 @@ function drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
   ctx.textAlign = "left";
 
   // Axe timer bar (when active)
-  if (gs.hasAxe) {
+  const axeBarVisible =
+    gs.axeTimer > 120 || Math.floor(gs.axeTimer / 10) % 2 === 0;
+  if (gs.hasAxe && axeBarVisible) {
     const axePct = gs.axeTimer / 600;
     const axeBarX = 438;
     const axeBarY = 4;
@@ -2170,27 +2279,86 @@ function drawTitleScreen(ctx: CanvasRenderingContext2D, frame: number) {
   ctx.textAlign = "left";
 }
 
+const LEVEL_PALETTES = [
+  {
+    bg1: "#0d0d1a",
+    bg2: "#1a0d2e",
+    platformColor: "#4a3060",
+    crystalColor: "#4fc3f7",
+    flashColor: "#1a0d2e",
+  },
+  {
+    bg1: "#0d1a0d",
+    bg2: "#0d2e1a",
+    platformColor: "#305040",
+    crystalColor: "#4fc3f7",
+    flashColor: "#0d2e1a",
+  },
+  {
+    bg1: "#1a0d0d",
+    bg2: "#2e0d0d",
+    platformColor: "#603030",
+    crystalColor: "#f74f4f",
+    flashColor: "#2e0d0d",
+  },
+  {
+    bg1: "#1a1a0d",
+    bg2: "#2e2e0d",
+    platformColor: "#605030",
+    crystalColor: "#f7c84f",
+    flashColor: "#2e2e0d",
+  },
+  {
+    bg1: "#0d1a1a",
+    bg2: "#0d2e2e",
+    platformColor: "#305060",
+    crystalColor: "#4ff7e8",
+    flashColor: "#0d2e2e",
+  },
+  {
+    bg1: "#1a0d1a",
+    bg2: "#2e0d2e",
+    platformColor: "#603060",
+    crystalColor: "#d44ff7",
+    flashColor: "#2e0d2e",
+  },
+  {
+    bg1: "#1a1a0d",
+    bg2: "#2e2e00",
+    platformColor: "#606000",
+    crystalColor: "#f7f74f",
+    flashColor: "#2e2e00",
+  },
+  {
+    bg1: "#0a0a0a",
+    bg2: "#1a0000",
+    platformColor: "#500000",
+    crystalColor: "#ff4f4f",
+    flashColor: "#1a0000",
+  },
+];
+
 const INTRO_PAGES = [
   {
     title: "THE STORY SO FAR...",
     lines: [
       "James Salt holds 10,000 ICP.",
       "",
-      "Portfolio value: $150,000",
+      "Portfolio value: $200,000",
       "",
       "He has diamond hands.",
-      "He has conviction.",
+      "James had conviction.",
       "He has a baseball cap.",
     ],
   },
   {
     title: "THE CRASH",
     lines: [
-      "THE MARKET CRASHES 85%",
+      "THE MARKET CRASHES 90%",
       "",
-      "ICP: $150 \u2192 $15",
+      "ICP: $20 \u2192 $2",
       "",
-      "Portfolio: $150,000 \u2192 $22,500",
+      "Portfolio: $200,000 \u2192 $20,000",
       "",
       "THE EVIL CRYPTO BEAR APPEARS!",
     ],
@@ -2206,6 +2374,23 @@ const INTRO_PAGES = [
       "",
       "Survive 8 years. Reach the",
       "ICP portal. Escape the mine.",
+    ],
+  },
+  {
+    title: "SURVIVAL BRIEFING",
+    lines: [
+      "The Salt Mines run on pure conviction.",
+      "And also Kaspa Kool-Aid.",
+      "",
+      "Collect ALL blue bottles on each level.",
+      "They're... hydrating. Financially.",
+      "",
+      "Miss even one?",
+      "The Crypto Bear keeps your soul.",
+      "(And your life. Literally.)",
+      "",
+      "The bear is not joking.",
+      "Neither are we.",
     ],
   },
 ];
@@ -2426,26 +2611,33 @@ function drawVictoryScreen(
 }
 
 function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
+  ctx.save();
+  ctx.scale(320 / 480, 480 / 640);
   ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
   if (gs.screen === "TITLE") {
     drawTitleScreen(ctx, gs.frameCount);
+    ctx.restore();
     return;
   }
   if (gs.screen === "INTRO") {
     drawIntroScreen(ctx, gs.introPage, gs.frameCount);
+    ctx.restore();
     return;
   }
   if (gs.screen === "YEAR_COMPLETE") {
     drawYearCompleteScreen(ctx, gs.level, gs.score, gs.frameCount);
+    ctx.restore();
     return;
   }
   if (gs.screen === "GAME_OVER") {
     drawGameOverScreen(ctx, gs.score, gs.frameCount);
+    ctx.restore();
     return;
   }
   if (gs.screen === "VICTORY") {
     drawVictoryScreen(ctx, gs.score, gs.lives, gs.frameCount);
+    ctx.restore();
     return;
   }
 
@@ -2455,8 +2647,16 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
   drawBackground(ctx, gs.level, gs.frameCount);
 
   // Platforms (randomly generated each level)
+  const levelPalette = LEVEL_PALETTES[gs.level % LEVEL_PALETTES.length];
   for (const plat of gs.currentPlatforms) {
-    drawPlatform(ctx, plat.x, plat.y, plat.w, plat.h);
+    drawPlatform(
+      ctx,
+      plat.x,
+      plat.y,
+      plat.w,
+      plat.h,
+      levelPalette.platformColor,
+    );
   }
 
   // Exit portal
@@ -2475,7 +2675,14 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
 
   // Bear
   const bear = level.bearPosition;
-  drawBear(ctx, bear.x - 20, bear.y - 40, gs.bearArmRaise);
+  drawBear(
+    ctx,
+    gs.bearX - 10,
+    bear.y - 40,
+    gs.bearArmRaise,
+    gs.bearThrowAnim,
+    gs.bearWalkFrame,
+  );
 
   // Steam particles
   for (const sp of gs.steamParticles) {
@@ -2494,10 +2701,24 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
   }
 
   // Player
-  drawPlayer(ctx, gs.player, gs.saltMeter, gs.hasAxe);
+  drawPlayer(
+    ctx,
+    gs.player,
+    gs.saltMeter,
+    gs.hasAxe,
+    gs.axeTimer,
+    gs.dyingTimer,
+  );
 
-  // HUD
-  drawHUD(ctx, gs);
+  // Level transition flash
+  if (gs.levelTransitionAlpha > 0) {
+    const palette = LEVEL_PALETTES[gs.level % LEVEL_PALETTES.length];
+    ctx.save();
+    ctx.globalAlpha = gs.levelTransitionAlpha;
+    ctx.fillStyle = palette.flashColor;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.restore();
+  }
 
   // Bottle warning overlay
   if (gs.bottleWarningTimer > 0) {
@@ -2522,64 +2743,22 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     ctx.restore();
   }
+  // End scale transform
+  ctx.restore();
 }
 
-const TOUCH_BTNS = [
-  { id: "left", dir: "left", x: 10, y: 80, w: 50, h: 50, key: "ArrowLeft" },
-  {
-    id: "right",
-    dir: "right",
-    x: 70,
-    y: 80,
-    w: 50,
-    h: 50,
-    key: "ArrowRight",
-  },
-  { id: "up", dir: "up", x: 40, y: 25, w: 50, h: 50, key: "ArrowUp" },
-  {
-    id: "down",
-    dir: "down",
-    x: 40,
-    y: 135,
-    w: 50,
-    h: 50,
-    key: "ArrowDown",
-  },
-  {
-    id: "jump",
-    dir: "jump",
-    x: 0,
-    y: 50,
-    w: 80,
-    h: 80,
-    key: "Space",
-    right: true,
-  },
-];
+// ---- REACT COMPONENT ----
 
-// SVG arrow renderer - no selectable text, no iOS copy-paste issues
-function CssArrow({ dir }: { dir: string }) {
-  const paths: Record<string, string> = {
-    left: "M14,2 L2,8 L14,14 Z",
-    right: "M2,2 L14,8 L2,14 Z",
-    up: "M2,14 L8,2 L14,14 Z",
-    down: "M2,2 L8,14 L14,2 Z",
-  };
-  const d = paths[dir];
-  if (!d) return null;
-  return (
-    <svg
-      aria-hidden
-      focusable="false"
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      style={{ display: "block", margin: "auto" }}
-    >
-      <title>{dir}</title>
-      <path d={d} fill="rgba(255,255,255,0.9)" />
-    </svg>
-  );
+interface HudData {
+  lives: number;
+  level: number;
+  score: number;
+  saltMeter: number;
+  hasAxe: boolean;
+  axeTimer: number;
+  bottlesLeft: number;
+  totalBottles: number;
+  icpModifier: number;
 }
 
 export default function Game() {
@@ -2613,8 +2792,27 @@ export default function Game() {
     sfxQueue: [],
     footstepTimer: 0,
     bottleWarningTimer: 0,
+    bearThrowAnim: 0,
+    levelTransitionAlpha: 0,
+    dyingTimer: 0,
+    bearX: 200,
+    bearDir: 1,
+    bearWalkFrame: 0,
   });
   const rafRef = useRef<number>(0);
+  const prevScreenRef = useRef<GameScreen>("TITLE");
+  const [leaderboard, setLeaderboard] = useState<
+    { name: string; score: number }[]
+  >(() => {
+    try {
+      return JSON.parse(localStorage.getItem("saltmine_leaderboard") || "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [showNameEntry, setShowNameEntry] = useState(false);
+  const [pendingScore, setPendingScore] = useState(0);
+  const [nameInput, setNameInput] = useState("");
   const [gamepadConnected, setGamepadConnected] = useState(false);
   const gamepadIndexRef = useRef<number>(-1);
   const [hasAxeDisplay, setHasAxeDisplay] = useState(false);
@@ -2628,11 +2826,23 @@ export default function Game() {
   const sfxMutedRef = useRef(false);
   const musicRef = useRef<HTMLAudioElement | null>(null);
   const musicStartedRef = useRef(false);
-  const [musicMuted, setMusicMuted] = useState(false);
+  const [_musicMuted, _setMusicMuted] = useState(false);
   const musicMutedRef = useRef(false);
+  const [hudData, setHudData] = useState<HudData>({
+    lives: 3,
+    level: 0,
+    score: 0,
+    saltMeter: 0,
+    hasAxe: false,
+    axeTimer: 600,
+    bottlesLeft: 0,
+    totalBottles: 0,
+    icpModifier: 1.0,
+  });
 
-  const toggleMusicMute = useCallback(() => {
-    setMusicMuted((prev) => {
+  // toggleMusicMute kept for future use
+  const _toggleMusicMute = useCallback(() => {
+    _setMusicMuted((prev) => {
       const next = !prev;
       musicMutedRef.current = next;
       if (musicRef.current) musicRef.current.muted = next;
@@ -2640,7 +2850,6 @@ export default function Game() {
     });
   }, []);
 
-  // Eagerly create and load the audio so iOS has it buffered before gesture
   useEffect(() => {
     const audio = new Audio(
       "/assets/uploads/neon-in-my-veins-019d32fe-e0e6-746b-8a8c-ba6c4cb124f1-1.mp3",
@@ -2648,18 +2857,13 @@ export default function Game() {
     audio.loop = true;
     audio.volume = 0.4;
     audio.muted = false;
-    audio.preload = "auto";
-    audio.load();
+    audio.preload = "none";
     audio.play().catch(() => {});
     musicRef.current = audio;
-
-    // One-shot global unlock: fire play() synchronously inside the first touchstart/click
     const unlock = () => {
       if (musicStartedRef.current) return;
       musicStartedRef.current = true;
-      audio.play().catch(() => {
-        /* still blocked – user can tap music button */
-      });
+      audio.play().catch(() => {});
       document.removeEventListener("touchstart", unlock, true);
       document.removeEventListener("click", unlock, true);
       document.removeEventListener("keydown", unlock, true);
@@ -2667,7 +2871,6 @@ export default function Game() {
     document.addEventListener("touchstart", unlock, true);
     document.addEventListener("click", unlock, true);
     document.addEventListener("keydown", unlock, true);
-
     return () => {
       document.removeEventListener("touchstart", unlock, true);
       document.removeEventListener("click", unlock, true);
@@ -2683,10 +2886,8 @@ export default function Game() {
     musicStartedRef.current = true;
     audio.muted = false;
     musicMutedRef.current = false;
-    setMusicMuted(false);
-    audio.play().catch(() => {
-      /* blocked */
-    });
+    _setMusicMuted(false);
+    audio.play().catch(() => {});
   }, []);
 
   const toggleSfxMute = useCallback(() => {
@@ -2705,6 +2906,18 @@ export default function Game() {
     },
     [],
   );
+
+  const submitScore = useCallback(() => {
+    if (!nameInput.trim()) return;
+    const newEntry = { name: nameInput.trim(), score: pendingScore };
+    const updated = [...leaderboard, newEntry]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10);
+    setLeaderboard(updated);
+    localStorage.setItem("saltmine_leaderboard", JSON.stringify(updated));
+    setShowNameEntry(false);
+    setNameInput("");
+  }, [nameInput, pendingScore, leaderboard]);
 
   const resetGame = useCallback(() => {
     const gs = gsRef.current;
@@ -2729,6 +2942,12 @@ export default function Game() {
     gs.keys = new Set();
     gs.sfxQueue = [];
     gs.footstepTimer = 0;
+    gs.bearThrowAnim = 0;
+    gs.levelTransitionAlpha = 0;
+    gs.dyingTimer = 0;
+    gs.bearX = 200;
+    gs.bearDir = 1;
+    gs.bearWalkFrame = 0;
   }, []);
 
   const handleSpace = useCallback(() => {
@@ -2757,18 +2976,14 @@ export default function Game() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      // Initialize AudioContext on first gesture
       if (!sfxAudioCtxRef.current) {
         try {
           sfxAudioCtxRef.current = new AudioContext();
           sfxRef.current = createSFX(sfxAudioCtxRef.current, () =>
             sfxMutedRef.current ? 0 : sfxVolumeRef.current,
           );
-        } catch (_e) {
-          /* ignore */
-        }
+        } catch (_e) {}
       }
-      // Start background music on first gesture
       startMusic();
       gsRef.current.keys.add(e.code);
       if (e.code === "Space" || e.code === "KeyZ") {
@@ -2802,12 +3017,10 @@ export default function Game() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
-
     let last = 0;
     function loop(ts: number) {
       const dt = Math.min((ts - last) / 16.67, 2);
       last = ts;
-      // Gamepad polling
       const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
       const gp =
         gamepadIndexRef.current >= 0 ? gamepads[gamepadIndexRef.current] : null;
@@ -2833,7 +3046,6 @@ export default function Game() {
         else gs.keys.delete("Space");
         if (btnB) gs.keys.add("AxeSmash");
         else gs.keys.delete("AxeSmash");
-        // Rising edge of A: advance screen
         if (btnA && !prevBtnARef.current) {
           if (
             [
@@ -2858,22 +3070,41 @@ export default function Game() {
             sfxRef.current = createSFX(sfxAudioCtxRef.current, () =>
               sfxMutedRef.current ? 0 : sfxVolumeRef.current,
             );
-          } catch (_e) {
-            /* ignore */
-          }
+          } catch (_e) {}
         }
         if (sfxRef.current) {
-          for (const e of gs.sfxQueue) {
-            sfxRef.current!.play(e);
-          }
+          for (const e of gs.sfxQueue) sfxRef.current!.play(e);
         }
         gs.sfxQueue = [];
       }
       renderGame(ctx, gs);
-      // Sync hasAxeDisplay state without thrashing renders
+      if (gs.screen !== prevScreenRef.current) {
+        prevScreenRef.current = gs.screen;
+        if (gs.screen === "GAME_OVER" || gs.screen === "VICTORY") {
+          setPendingScore(gs.score);
+          setShowNameEntry(true);
+          setNameInput("");
+        }
+      }
       if (gs.hasAxe !== hasAxeDisplayRef.current) {
         hasAxeDisplayRef.current = gs.hasAxe;
         setHasAxeDisplay(gs.hasAxe);
+      }
+      // Update HUD data every frame (React batches these efficiently)
+      if (gs.frameCount % 3 === 0) {
+        const bottlesLeft = gs.koolaids.filter((k) => !k.collected).length;
+        const totalBottles = gs.koolaids.length;
+        setHudData({
+          lives: gs.lives,
+          level: gs.level,
+          score: gs.score,
+          saltMeter: gs.saltMeter,
+          hasAxe: gs.hasAxe,
+          axeTimer: gs.axeTimer,
+          bottlesLeft,
+          totalBottles,
+          icpModifier: gs.icpModifier,
+        });
       }
       rafRef.current = requestAnimationFrame(loop);
     }
@@ -2881,7 +3112,6 @@ export default function Game() {
     return () => cancelAnimationFrame(rafRef.current);
   }, [handleSpace]);
 
-  // Gamepad connection listeners
   useEffect(() => {
     const onConnect = (e: GamepadEvent) => {
       setGamepadConnected(true);
@@ -2890,7 +3120,6 @@ export default function Game() {
     const onDisconnect = () => {
       setGamepadConnected(false);
       gamepadIndexRef.current = -1;
-      // Clear gamepad keys on disconnect
       const gs = gsRef.current;
       gs.keys.delete("ArrowLeft");
       gs.keys.delete("ArrowRight");
@@ -2906,9 +3135,6 @@ export default function Game() {
       window.removeEventListener("gamepaddisconnected", onDisconnect);
     };
   }, []);
-
-  // Touch handlers
-  // touchActive unused
 
   const onTouchBtn = useCallback(
     (key: string, active: boolean) => {
@@ -2935,164 +3161,396 @@ export default function Game() {
     [handleSpace],
   );
 
+  const icpPrice = ICP_PRICES[hudData.level] * hudData.icpModifier;
+  const portfolio = icpPrice * 10000;
+
   return (
     <div
       style={{
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        justifyContent: "center",
-        width: "100vw",
-        height: "100vh",
         background: "#000",
+        minHeight: "100dvh",
         overflow: "hidden",
-        position: "relative",
+        userSelect: "none",
+        WebkitUserSelect: "none",
       }}
     >
-      <div style={{ position: "relative", display: "inline-block" }}>
+      {/* ── HTML HUD STRIP ── */}
+      <div
+        style={{
+          width: 320,
+          maxWidth: "100vw",
+          background: "#050510",
+          borderBottom: "2px solid #4fc3f7",
+          padding: "4px 8px",
+          boxSizing: "border-box",
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "4px 6px",
+          fontFamily: "monospace",
+        }}
+      >
+        {/* Lives */}
+        <div
+          style={{ display: "flex", gap: 2 }}
+          aria-label={`${hudData.lives} lives`}
+        >
+          {[1, 2, 3].map((n) => (
+            <svg
+              key={n}
+              aria-hidden="true"
+              width="13"
+              height="13"
+              viewBox="0 0 13 13"
+              style={{ opacity: n <= hudData.lives ? 1 : 0.15 }}
+            >
+              <rect x="2" y="1" width="3" height="2" fill="#ff3333" />
+              <rect x="7" y="1" width="3" height="2" fill="#ff3333" />
+              <rect x="1" y="3" width="10" height="4" fill="#ff3333" />
+              <rect x="2" y="7" width="8" height="2" fill="#ff3333" />
+              <rect x="3" y="9" width="6" height="2" fill="#ff3333" />
+              <rect x="4" y="11" width="4" height="1" fill="#ff3333" />
+              <rect x="5" y="12" width="2" height="1" fill="#ff3333" />
+            </svg>
+          ))}
+        </div>
+
+        {/* Year */}
+        <div
+          style={{
+            color: "#ffd700",
+            fontSize: 11,
+            fontWeight: "bold",
+            minWidth: 44,
+          }}
+        >
+          YR {hudData.level + 1}/8
+        </div>
+
+        {/* ICP Price */}
+        <div style={{ color: "#4fc3f7", fontSize: 10, minWidth: 60 }}>
+          ICP ${icpPrice.toFixed(2)}
+        </div>
+
+        {/* Portfolio */}
+        <div style={{ color: "#81c784", fontSize: 10, minWidth: 70 }}>
+          ${portfolio.toLocaleString()}
+        </div>
+
+        {/* Score */}
+        <div style={{ color: "#ffffff", fontSize: 10, minWidth: 40 }}>
+          {hudData.score}
+        </div>
+
+        {/* Bottles - using teal bottle icon */}
+        <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+          <svg aria-hidden="true" width="10" height="18" viewBox="0 0 16 22">
+            {/* Cap */}
+            <rect x="4" y="0" width="8" height="5" fill="#ff5722" />
+            {/* Bottle body */}
+            <rect x="3" y="6" width="10" height="13" fill="#00bcd4" />
+            <rect x="2" y="8" width="12" height="9" fill="#00bcd4" />
+            <rect x="4" y="4" width="8" height="5" fill="#00bcd4" />
+            {/* Label */}
+            <rect x="3" y="9" width="10" height="6" fill="#ffffff" />
+            {/* Highlight */}
+            <rect
+              x="4"
+              y="6"
+              width="2"
+              height="10"
+              fill="rgba(255,255,255,0.5)"
+            />
+          </svg>
+          <span style={{ color: "#00bcd4", fontSize: 10 }}>
+            {hudData.totalBottles - hudData.bottlesLeft}/{hudData.totalBottles}
+          </span>
+        </div>
+
+        {/* Salt Meter */}
+        <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+          <span style={{ color: "#aaa", fontSize: 9 }}>☠</span>
+          <div
+            style={{
+              width: 36,
+              height: 8,
+              background: "#1a1a1a",
+              border: "1px solid #555",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                width: `${hudData.saltMeter}%`,
+                height: "100%",
+                background:
+                  hudData.saltMeter > 75
+                    ? "#f44336"
+                    : hudData.saltMeter > 40
+                      ? "#ff9800"
+                      : "#4caf50",
+                transition: "width 0.1s",
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Axe timer bar (only when holding axe) */}
+        {hudData.hasAxe && (
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            <span style={{ color: "#ffd700", fontSize: 9 }}>⛏</span>
+            <div
+              style={{
+                width: 30,
+                height: 8,
+                background: "#1a1a1a",
+                border: "1px solid #666",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${Math.min(100, (hudData.axeTimer / 600) * 100)}%`,
+                  height: "100%",
+                  background:
+                    hudData.axeTimer < 120
+                      ? Math.floor(Date.now() / 200) % 2 === 0
+                        ? "#ffd700"
+                        : "#ff4444"
+                      : "#ffd700",
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* SFX controls (right-aligned) */}
+        <div
+          style={{
+            marginLeft: "auto",
+            display: "flex",
+            gap: 4,
+            alignItems: "center",
+          }}
+        >
+          {!sfxMuted && (
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={sfxVolume}
+              onChange={handleSfxVolume}
+              data-ocid="sfx.select"
+              title="SFX volume"
+              style={{
+                width: 44,
+                height: 4,
+                accentColor: "#4fc3f7",
+                cursor: "pointer",
+              }}
+            />
+          )}
+          <button
+            type="button"
+            data-ocid="sfx.toggle"
+            onClick={() => {
+              if (!sfxAudioCtxRef.current) {
+                try {
+                  sfxAudioCtxRef.current = new AudioContext();
+                  sfxRef.current = createSFX(sfxAudioCtxRef.current, () =>
+                    sfxMutedRef.current ? 0 : sfxVolumeRef.current,
+                  );
+                } catch (_e) {}
+              }
+              toggleSfxMute();
+            }}
+            title={sfxMuted ? "Unmute SFX" : "Mute SFX"}
+            style={{
+              width: 28,
+              height: 28,
+              background: "rgba(0,0,0,0.6)",
+              border: "1px solid rgba(255,255,255,0.3)",
+              borderRadius: 6,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 0,
+            }}
+          >
+            <svg
+              aria-hidden="true"
+              width="16"
+              height="16"
+              viewBox="0 0 22 22"
+              fill="none"
+            >
+              {sfxMuted ? (
+                <>
+                  <circle
+                    cx="11"
+                    cy="11"
+                    r="7"
+                    stroke="rgba(255,255,255,0.5)"
+                    strokeWidth="1.8"
+                  />
+                  <path
+                    d="M8 8L14 14M14 8L8 14"
+                    stroke="rgba(255,255,255,0.5)"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </>
+              ) : (
+                <>
+                  <circle
+                    cx="11"
+                    cy="11"
+                    r="7"
+                    stroke="white"
+                    strokeWidth="1.8"
+                  />
+                  <path
+                    d="M9 8V14M11 7V15M13 9V13"
+                    stroke="white"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </>
+              )}
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* ── GAME CANVAS ── */}
+      <div style={{ position: "relative", lineHeight: 0 }}>
         <canvas
           ref={canvasRef}
-          width={CANVAS_W}
-          height={CANVAS_H}
+          width={320}
+          height={480}
           data-ocid="game.canvas_target"
           style={{
             imageRendering: "pixelated",
             display: "block",
             maxWidth: "100vw",
-            maxHeight: "100vh",
-            width: "auto",
-            height: "auto",
           }}
         />
-        {/* Touch controls overlay */}
-        {!gamepadConnected && (
-          <div
-            style={{
-              position: "absolute",
-              bottom: 0,
-              left: 0,
-              right: 0,
-              height: "220px",
-              pointerEvents: "none",
-            }}
-          >
-            {/* Left d-pad */}
-            <div
-              style={{
-                position: "absolute",
-                left: 12,
-                bottom: 12,
-                width: 130,
-                height: 200,
-                pointerEvents: "auto",
-              }}
-            >
-              {TOUCH_BTNS.filter((b) => !b.right).map((btn) => (
-                <button
-                  type="button"
-                  key={btn.id}
-                  data-ocid={`controls.${btn.id}_button`}
-                  onTouchStart={(e) => {
-                    e.preventDefault();
-                    startMusic();
-                    onTouchBtn(btn.key, true);
-                  }}
-                  onTouchEnd={(e) => {
-                    e.preventDefault();
-                    onTouchBtn(btn.key, false);
-                  }}
-                  onMouseDown={() => onTouchBtn(btn.key, true)}
-                  onMouseUp={() => onTouchBtn(btn.key, false)}
-                  style={{
-                    position: "absolute",
-                    left: btn.x,
-                    top: btn.y,
-                    width: btn.w,
-                    height: btn.h,
-                    background: "rgba(255,255,255,0.15)",
-                    border: "2px solid rgba(255,255,255,0.3)",
-                    borderRadius: 8,
-                    color: "#fff",
-                    fontSize: 18,
-                    cursor: "pointer",
-                    userSelect: "none",
-                    touchAction: "none",
-                    WebkitUserSelect: "none",
-                    WebkitTouchCallout: "none",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <CssArrow dir={btn.dir} />
-                </button>
-              ))}
-            </div>
-            {/* Jump button */}
+      </div>
+
+      {/* ── TOUCH CONTROLS STRIP ── */}
+      {!gamepadConnected && (
+        <div
+          style={{
+            width: 320,
+            maxWidth: "100vw",
+            height: 110,
+            background: "#080814",
+            borderTop: "2px solid #1a1a3a",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "0 16px",
+            boxSizing: "border-box",
+            flexShrink: 0,
+          }}
+        >
+          {/* Left: D-pad (left / right only) */}
+          <div style={{ display: "flex", gap: 10 }}>
+            {/* LEFT button */}
             <button
               type="button"
-              data-ocid="controls.jump_button"
+              data-ocid="controls.left_button"
               onTouchStart={(e) => {
                 e.preventDefault();
                 startMusic();
-                onTouchBtn("Space", true);
+                onTouchBtn("ArrowLeft", true);
               }}
               onTouchEnd={(e) => {
                 e.preventDefault();
-                onTouchBtn("Space", false);
+                onTouchBtn("ArrowLeft", false);
               }}
-              onMouseDown={() => onTouchBtn("Space", true)}
-              onMouseUp={() => onTouchBtn("Space", false)}
+              onMouseDown={() => onTouchBtn("ArrowLeft", true)}
+              onMouseUp={() => onTouchBtn("ArrowLeft", false)}
+              onMouseLeave={() => onTouchBtn("ArrowLeft", false)}
+              aria-label="Left"
               style={{
-                position: "absolute",
-                right: 20,
-                bottom: 20,
-                width: 80,
-                height: 80,
-                background: "rgba(79,195,247,0.25)",
-                border: "2px solid rgba(79,195,247,0.5)",
-                borderRadius: "50%",
-                color: "#4fc3f7",
-                fontSize: 14,
-                fontWeight: "bold",
+                width: 60,
+                height: 60,
+                background: "rgba(255,255,255,0.12)",
+                border: "2px solid rgba(255,255,255,0.25)",
+                borderRadius: 12,
                 cursor: "pointer",
-                userSelect: "none",
-                touchAction: "none",
-                pointerEvents: "auto",
-                WebkitUserSelect: "none",
-                WebkitTouchCallout: "none",
                 display: "flex",
-                flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
-                gap: 3,
+                touchAction: "none",
+                WebkitUserSelect: "none",
+                WebkitTouchCallout: "none",
               }}
-              aria-label="Jump"
             >
-              {/* CSS arrow up for jump */}
-              <span
-                aria-hidden
-                style={{
-                  display: "block",
-                  width: 0,
-                  height: 0,
-                  borderLeft: "10px solid transparent",
-                  borderRight: "10px solid transparent",
-                  borderBottom: "14px solid rgba(79,195,247,0.9)",
-                }}
-              />
-              <span
-                aria-hidden
-                style={{
-                  display: "block",
-                  width: 16,
-                  height: 3,
-                  background: "rgba(79,195,247,0.7)",
-                  borderRadius: 2,
-                }}
-              />
+              <svg
+                aria-hidden="true"
+                focusable="false"
+                width="22"
+                height="22"
+                viewBox="0 0 16 16"
+              >
+                <path d="M14,2 L2,8 L14,14 Z" fill="rgba(255,255,255,0.9)" />
+              </svg>
             </button>
-            {/* B / Axe Smash button */}
+
+            {/* RIGHT button */}
+            <button
+              type="button"
+              data-ocid="controls.right_button"
+              onTouchStart={(e) => {
+                e.preventDefault();
+                startMusic();
+                onTouchBtn("ArrowRight", true);
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onTouchBtn("ArrowRight", false);
+              }}
+              onMouseDown={() => onTouchBtn("ArrowRight", true)}
+              onMouseUp={() => onTouchBtn("ArrowRight", false)}
+              onMouseLeave={() => onTouchBtn("ArrowRight", false)}
+              aria-label="Right"
+              style={{
+                width: 60,
+                height: 60,
+                background: "rgba(255,255,255,0.12)",
+                border: "2px solid rgba(255,255,255,0.25)",
+                borderRadius: 12,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                touchAction: "none",
+                WebkitUserSelect: "none",
+                WebkitTouchCallout: "none",
+              }}
+            >
+              <svg
+                aria-hidden="true"
+                focusable="false"
+                width="22"
+                height="22"
+                viewBox="0 0 16 16"
+              >
+                <path d="M2,2 L14,8 L2,14 Z" fill="rgba(255,255,255,0.9)" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Right: Action buttons B (axe) + A (jump) */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* B / Axe button */}
             <button
               type="button"
               data-ocid="controls.axe_button"
@@ -3107,241 +3565,228 @@ export default function Game() {
               }}
               onMouseDown={() => onTouchBtn("AxeSmash", true)}
               onMouseUp={() => onTouchBtn("AxeSmash", false)}
+              onMouseLeave={() => onTouchBtn("AxeSmash", false)}
+              aria-label="Axe Smash B"
               style={{
-                position: "absolute",
-                right: 20,
-                bottom: 115,
-                width: 80,
-                height: 80,
+                width: 60,
+                height: 44,
                 background: hasAxeDisplay
                   ? "rgba(255,200,50,0.25)"
                   : "rgba(255,255,255,0.1)",
-                border: `2px solid ${hasAxeDisplay ? "rgba(255,200,50,0.5)" : "rgba(255,255,255,0.2)"}`,
-                borderRadius: "50%",
-                color: hasAxeDisplay ? "#ffc832" : "rgba(255,255,255,0.4)",
-                fontSize: 22,
-                fontWeight: "bold",
+                border: `2px solid ${hasAxeDisplay ? "rgba(255,200,50,0.6)" : "rgba(255,255,255,0.2)"}`,
+                borderRadius: 10,
                 cursor: "pointer",
-                userSelect: "none",
-                touchAction: "none",
-                pointerEvents: "auto",
-                WebkitUserSelect: "none",
-                WebkitTouchCallout: "none",
                 display: "flex",
-                flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
-                gap: 2,
+                gap: 4,
+                color: hasAxeDisplay ? "#ffc832" : "rgba(255,255,255,0.4)",
+                fontFamily: "monospace",
+                fontSize: 12,
+                fontWeight: "bold",
+                touchAction: "none",
+                WebkitUserSelect: "none",
+                WebkitTouchCallout: "none",
               }}
-              aria-label="Axe Smash"
             >
-              <span aria-hidden style={{ fontSize: 24, lineHeight: 1 }}>
-                ⛏️
+              <span aria-hidden>⛏</span>
+              <span aria-hidden>B</span>
+            </button>
+
+            {/* A / Jump button */}
+            <button
+              type="button"
+              data-ocid="controls.jump_button"
+              onTouchStart={(e) => {
+                e.preventDefault();
+                startMusic();
+                onTouchBtn("Space", true);
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onTouchBtn("Space", false);
+              }}
+              onMouseDown={() => onTouchBtn("Space", true)}
+              onMouseUp={() => onTouchBtn("Space", false)}
+              onMouseLeave={() => onTouchBtn("Space", false)}
+              aria-label="Jump A"
+              style={{
+                width: 60,
+                height: 44,
+                background: "rgba(79,195,247,0.2)",
+                border: "2px solid rgba(79,195,247,0.5)",
+                borderRadius: 10,
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 4,
+                color: "#4fc3f7",
+                fontFamily: "monospace",
+                fontSize: 12,
+                fontWeight: "bold",
+                touchAction: "none",
+                WebkitUserSelect: "none",
+                WebkitTouchCallout: "none",
+              }}
+            >
+              <span aria-hidden style={{ fontSize: 14 }}>
+                ▲
               </span>
-              <span aria-hidden style={{ fontSize: 10, letterSpacing: 1 }}>
-                B
-              </span>
+              <span aria-hidden>A</span>
             </button>
           </div>
-        )}
-      </div>
-      {/* Music controls */}
+        </div>
+      )}
+
+      {/* ── FOOTER ── */}
       <div
         style={{
-          position: "absolute",
-          top: 10,
-          right: 106,
-          display: "flex",
-          alignItems: "center",
-          zIndex: 10,
+          color: "#333",
+          fontFamily: "monospace",
+          fontSize: 9,
+          padding: "4px 0 2px",
+          textAlign: "center",
         }}
       >
-        <button
-          type="button"
-          data-ocid="music.toggle"
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            if (!musicStartedRef.current) {
-              startMusic();
-            } else {
-              toggleMusicMute();
-            }
-          }}
-          onClick={() => {
-            if (!musicStartedRef.current) {
-              startMusic();
-            } else {
-              toggleMusicMute();
-            }
-          }}
-          title={musicMuted ? "Unmute Music" : "Mute Music"}
-          aria-label={musicMuted ? "Unmute Music" : "Mute Music"}
+        © {new Date().getFullYear()}.{" "}
+        <a
+          href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(window.location.hostname)}`}
+          target="_blank"
+          rel="noreferrer"
+          style={{ color: "#444", textDecoration: "none" }}
+        >
+          Built with ♥ using caffeine.ai
+        </a>
+      </div>
+
+      {/* ── LEADERBOARD MODAL (fixed, centered over everything) ── */}
+      {showNameEntry && (
+        <div
+          data-ocid="leaderboard.modal"
           style={{
-            width: 40,
-            height: 40,
-            background: "rgba(0,0,0,0.6)",
-            border: "2px solid rgba(255,255,255,0.3)",
-            borderRadius: 8,
-            cursor: "pointer",
+            position: "fixed",
+            inset: 0,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
+            background: "rgba(0,0,0,0.92)",
+            zIndex: 200,
+            fontFamily: "monospace",
+            padding: 16,
           }}
         >
-          <svg
-            width="22"
-            height="22"
-            viewBox="0 0 22 22"
-            fill="none"
-            aria-hidden="true"
-            role="presentation"
-          >
-            {musicMuted ? (
-              <>
-                <path
-                  d="M9 6L9 16L14 13L14 9L9 6Z"
-                  stroke="rgba(255,255,255,0.45)"
-                  strokeWidth="1.6"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M6 8L16 14"
-                  stroke="rgba(255,255,255,0.45)"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                />
-              </>
-            ) : (
-              <>
-                <path
-                  d="M9 6L9 16L14 13L14 9L9 6Z"
-                  stroke="white"
-                  strokeWidth="1.6"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M16 8C17.1 9.1 17.1 12.9 16 14"
-                  stroke="white"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                />
-                <path
-                  d="M14 9H18"
-                  stroke="white"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                />
-              </>
-            )}
-          </svg>
-        </button>
-      </div>
-      {/* SFX controls */}
-      <div
-        style={{
-          position: "absolute",
-          top: 10,
-          right: 58,
-          display: "flex",
-          flexDirection: "row",
-          gap: 4,
-          alignItems: "center",
-          zIndex: 10,
-        }}
-      >
-        {!sfxMuted && (
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.05"
-            value={sfxVolume}
-            onChange={handleSfxVolume}
-            data-ocid="sfx.select"
-            title="SFX volume"
+          <div
             style={{
-              width: 60,
-              height: 4,
-              accentColor: "#4fc3f7",
-              cursor: "pointer",
+              background: "#080818",
+              border: "2px solid #ffd700",
+              borderRadius: 8,
+              padding: "24px 20px",
+              maxWidth: 300,
+              width: "100%",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 8,
             }}
-          />
-        )}
-        <button
-          type="button"
-          data-ocid="sfx.toggle"
-          onClick={() => {
-            if (!sfxAudioCtxRef.current) {
-              try {
-                sfxAudioCtxRef.current = new AudioContext();
-                sfxRef.current = createSFX(sfxAudioCtxRef.current, () =>
-                  sfxMutedRef.current ? 0 : sfxVolumeRef.current,
-                );
-              } catch (_e) {
-                /* ignore */
-              }
-            }
-            toggleSfxMute();
-          }}
-          title={sfxMuted ? "Unmute SFX" : "Mute SFX"}
-          aria-label={sfxMuted ? "Unmute SFX" : "Mute SFX"}
-          style={{
-            width: 40,
-            height: 40,
-            background: "rgba(0,0,0,0.6)",
-            border: "2px solid rgba(255,255,255,0.3)",
-            borderRadius: 8,
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <svg
-            width="22"
-            height="22"
-            viewBox="0 0 22 22"
-            fill="none"
-            aria-hidden="true"
-            role="presentation"
           >
-            {sfxMuted ? (
-              <>
-                <circle
-                  cx="11"
-                  cy="11"
-                  r="7"
-                  stroke="rgba(255,255,255,0.5)"
-                  strokeWidth="1.8"
-                />
-                <path
-                  d="M8 8L14 14M14 8L8 14"
-                  stroke="rgba(255,255,255,0.5)"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
-              </>
-            ) : (
-              <>
-                <circle
-                  cx="11"
-                  cy="11"
-                  r="7"
-                  stroke="white"
-                  strokeWidth="1.8"
-                />
-                <path
-                  d="M9 8V14M11 7V15M13 9V13"
-                  stroke="white"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
-              </>
+            <div
+              style={{
+                fontSize: 20,
+                fontWeight: "bold",
+                color: "#ffd700",
+                letterSpacing: 3,
+              }}
+            >
+              {gsRef.current.screen === "VICTORY"
+                ? "YOU ESCAPED!"
+                : "GAME OVER"}
+            </div>
+            <div style={{ fontSize: 12, color: "#aaa" }}>
+              SCORE: {pendingScore.toLocaleString()}
+            </div>
+
+            <div style={{ fontSize: 13, color: "#ffd700", marginTop: 8 }}>
+              ⛏ ENTER YOUR NAME
+            </div>
+            <input
+              maxLength={12}
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitScore();
+              }}
+              data-ocid="leaderboard.input"
+              placeholder="YOUR NAME"
+              style={{
+                background: "#1a1a2e",
+                color: "#ffd700",
+                border: "2px solid #ffd700",
+                fontFamily: "monospace",
+                fontSize: 16,
+                padding: "6px 12px",
+                textAlign: "center",
+                width: "100%",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+            <button
+              type="button"
+              onClick={submitScore}
+              data-ocid="leaderboard.submit_button"
+              style={{
+                background: "#ffd700",
+                color: "#000",
+                fontFamily: "monospace",
+                fontWeight: "bold",
+                padding: "8px 28px",
+                cursor: "pointer",
+                border: "none",
+                fontSize: 14,
+                letterSpacing: 2,
+                borderRadius: 4,
+                width: "100%",
+              }}
+            >
+              SUBMIT
+            </button>
+
+            <div
+              style={{
+                fontSize: 12,
+                color: "#ffd700",
+                letterSpacing: 2,
+                marginTop: 8,
+              }}
+            >
+              — TOP SCORES —
+            </div>
+            {leaderboard.length === 0 && (
+              <div style={{ fontSize: 11, color: "#555" }}>
+                No scores yet. Be the first!
+              </div>
             )}
-          </svg>
-        </button>
-      </div>
+            {leaderboard.slice(0, 10).map((entry, i) => (
+              <div
+                key={`${entry.name}-${i}`}
+                data-ocid={`leaderboard.item.${i + 1}`}
+                style={{
+                  fontSize: 11,
+                  color: i === 0 ? "#ffd700" : "#aaa",
+                  fontFamily: "monospace",
+                }}
+              >
+                {String(i + 1).padStart(2, " ")}. {entry.name.padEnd(12, " ")}{" "}
+                {entry.score.toLocaleString()}
+              </div>
+            ))}
+            <div style={{ fontSize: 10, color: "#555", marginTop: 8 }}>
+              PRESS SPACE TO PLAY AGAIN
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

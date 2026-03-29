@@ -140,57 +140,57 @@ export const LEVELS: LevelData[] = [
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
   // Level 2
   {
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
   // Level 3
   {
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
   // Level 4
   {
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
   // Level 5
   {
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
   // Level 6
   {
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
   // Level 7
   {
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
   // Level 8
   {
     platforms: [],
     koolaidPositions: [],
     bearPosition: { x: 200, y: H - 620 },
-    exitPosition: { x: 220, y: H - 615 },
+    exitPosition: { x: 405, y: H - 580 },
   },
 ];
 
-export const ICP_PRICES = [15, 22, 31, 45, 62, 85, 110, 150];
+export const ICP_PRICES = [2, 3, 5, 7, 10, 13, 17, 20];
