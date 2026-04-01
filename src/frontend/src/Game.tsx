@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ICP_PRICES, LEVELS, generateRandomPlatforms } from "./levels";
+import { LEVELS, generateRandomPlatforms } from "./levels";
 import type { LevelData, Platform } from "./levels";
 import { createSFX } from "./sfx";
 
@@ -36,7 +36,8 @@ interface Hazard {
   id: number;
   type:
     | "boulder"
-    | "candle"
+    | "redCandle"
+    | "greenCandle"
     | "pickaxe"
     | "cart"
     | "barrel"
@@ -53,12 +54,43 @@ interface Hazard {
   wasOnGround: boolean;
   rotation: number;
   frame: number;
+  fallsThrough?: boolean;
+  flagged?: "explode" | "fade";
+  flagTimer?: number;
 }
 
-interface KoolAid {
+interface WaterBottle {
   x: number;
   y: number;
   collected: boolean;
+}
+
+interface MaturityBag {
+  id: number;
+  x: number;
+  y: number;
+  lifetime: number;
+  maxLifetime: number;
+  amount: number;
+  collected: boolean;
+}
+
+interface CommunityBag {
+  id: number;
+  x: number;
+  y: number;
+  lifetime: number;
+  maxLifetime: number;
+  collected: boolean;
+}
+
+interface FloatingText {
+  id: number;
+  x: number;
+  y: number;
+  text: string;
+  timer: number;
+  color: string;
 }
 
 interface AxePickup {
@@ -67,6 +99,32 @@ interface AxePickup {
   vy: number;
   collected: boolean;
   landed: boolean;
+}
+
+interface GunPickup {
+  x: number;
+  y: number;
+  collected: boolean;
+}
+
+interface Bullet {
+  id: number;
+  x: number;
+  y: number;
+  vx: number;
+  w: number;
+  h: number;
+  lifetime: number;
+}
+
+interface ExplosionProjectile {
+  id: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  lifetime: number;
+  maxLifetime: number;
 }
 
 interface SpawnerState {
@@ -78,16 +136,22 @@ interface GameState {
   introPage: number;
   level: number;
   lives: number;
-  score: number;
+  portfolioValue: number;
   saltMeter: number; // 0-100
   player: Player;
   hazards: Hazard[];
-  koolaids: KoolAid[];
+  waterBottles: WaterBottle[];
   spawnerStates: SpawnerState[];
   hasAxe: boolean;
   axeTimer: number;
   axePickups: AxePickup[];
-  icpModifier: number;
+  portfolioMultiplier: number;
+  maturityBags: MaturityBag[];
+  communityBags: CommunityBag[];
+  floatingTexts: FloatingText[];
+  maturitySpawnTimer: number;
+  nextMaturityId: number;
+  nextFloatTextId: number;
   debuffTimer: number;
   bearThrowTimer: number;
   nextHazardId: number;
@@ -108,6 +172,14 @@ interface GameState {
   bearX: number;
   bearDir: number;
   bearWalkFrame: number;
+  hasGun: boolean;
+  gunTimer: number;
+  gunCooldown: number;
+  gunPickups: GunPickup[];
+  bullets: Bullet[];
+  nextBulletId: number;
+  explosionProjectiles: ExplosionProjectile[];
+  nextExplosionId: number;
 }
 
 const PLAYER_W = 24;
@@ -142,7 +214,11 @@ function initLevel(gs: GameState, levelIdx: number) {
   gs.hasAxe = false;
   gs.axeTimer = 0;
   gs.axePickups = [];
-  gs.icpModifier = 1.0;
+  gs.portfolioMultiplier = 1.0;
+  gs.maturityBags = [];
+  gs.communityBags = [];
+  gs.floatingTexts = [];
+  gs.maturitySpawnTimer = 0;
   gs.debuffTimer = 0;
   gs.bearThrowTimer = 0;
   gs.nextHazardId = 1;
@@ -158,6 +234,14 @@ function initLevel(gs: GameState, levelIdx: number) {
   gs.bearX = 200;
   gs.bearDir = 1;
   gs.bearWalkFrame = 0;
+  gs.hasGun = false;
+  gs.gunTimer = 0;
+  gs.gunCooldown = 0;
+  gs.gunPickups = [];
+  gs.bullets = [];
+  gs.nextBulletId = 1;
+  gs.explosionProjectiles = [];
+  gs.nextExplosionId = 1;
 
   // Generate random platforms for this level run
   gs.currentPlatforms = generateRandomPlatforms(levelIdx);
@@ -167,7 +251,7 @@ function initLevel(gs: GameState, levelIdx: number) {
     (p) => p.y < CANVAS_H - 30 && p.w > 20,
   );
   const numBottles = 2 + levelIdx; // grows from 2 (level 1) to 9 (level 8)
-  gs.koolaids = [];
+  gs.waterBottles = [];
   const usedPlats = new Set<number>();
   for (let i = 0; i < numBottles && i < placementPlats.length; i++) {
     let platIdx: number;
@@ -178,7 +262,7 @@ function initLevel(gs: GameState, levelIdx: number) {
     } while (usedPlats.has(platIdx) && tries < 20);
     usedPlats.add(platIdx);
     const plat = placementPlats[platIdx];
-    gs.koolaids.push({
+    gs.waterBottles.push({
       x: plat.x + 10 + Math.random() * Math.max(0, plat.w - 20),
       y: plat.y - 18,
       collected: false,
@@ -202,6 +286,19 @@ function initLevel(gs: GameState, levelIdx: number) {
         landed: true,
       });
     }
+  }
+
+  // Spawn gun pickup on a random mid platform (different from axe)
+  const gunPlats = gs.currentPlatforms.filter(
+    (p) => p.y < CANVAS_H - 50 && p.y > CANVAS_H - 550,
+  );
+  if (gunPlats.length > 0) {
+    const plat = gunPlats[Math.floor(Math.random() * gunPlats.length)];
+    gs.gunPickups.push({
+      x: plat.x + 20 + Math.random() * Math.max(0, plat.w - 40),
+      y: plat.y - 16,
+      collected: false,
+    });
   }
 }
 
@@ -306,16 +403,34 @@ function updateGame(gs: GameState, _dt: number) {
         const idx = smashed[si];
         const h = gs.hazards[idx];
         if (h.type === "chest") {
-          gs.icpModifier = Math.min(2.5, gs.icpModifier + 0.15);
-          gs.score += 2000;
+          gs.portfolioMultiplier = Math.min(2.5, gs.portfolioMultiplier + 0.15);
+          gs.portfolioValue += 2000;
           gs.sfxQueue.push("chest_good");
-        } else {
-          gs.score += 150;
+        } else if (h.type !== "greenCandle" && h.type !== "redCandle") {
+          gs.portfolioValue += 150;
         }
         gs.hazards.splice(idx, 1);
       }
     }
   }
+  // Gun shoot when has gun (and not axe)
+  if (gs.keys.has("AxeSmash") && gs.hasGun && !gs.hasAxe && p.hitTimer === 0) {
+    if (gs.gunCooldown <= 0) {
+      gs.sfxQueue.push("powerup");
+      gs.bullets.push({
+        id: gs.nextBulletId++,
+        x: p.x + (p.facing === 1 ? p.w : -16),
+        y: p.y + p.h / 2 - 3,
+        vx: p.facing * 8,
+        w: 16,
+        h: 6,
+        lifetime: 60,
+      });
+      gs.gunCooldown = 15;
+    }
+  }
+  if (gs.gunCooldown > 0) gs.gunCooldown--;
+
   // Horizontal
   if (left) {
     p.vx = -walkSpeed;
@@ -416,7 +531,8 @@ function updateGame(gs: GameState, _dt: number) {
     const roll = Math.random();
     type HazType =
       | "boulder"
-      | "candle"
+      | "redCandle"
+      | "greenCandle"
       | "pickaxe"
       | "cart"
       | "barrel"
@@ -426,10 +542,13 @@ function updateGame(gs: GameState, _dt: number) {
     let hType: HazType;
     if (roll < 0.15) {
       hType = "chest";
+    } else if (roll < 0.3) {
+      hType = "redCandle";
+    } else if (roll < 0.42) {
+      hType = "greenCandle";
     } else {
       const types: HazType[] = [
         "boulder",
-        "candle",
         "cart",
         "barrel",
         "doompost",
@@ -443,7 +562,7 @@ function updateGame(gs: GameState, _dt: number) {
     const hw =
       hType === "cart"
         ? 32
-        : hType === "candle"
+        : hType === "redCandle" || hType === "greenCandle"
           ? 18
           : hType === "boulder"
             ? 20
@@ -459,7 +578,7 @@ function updateGame(gs: GameState, _dt: number) {
     const hh =
       hType === "cart"
         ? 22
-        : hType === "candle"
+        : hType === "redCandle" || hType === "greenCandle"
           ? 24
           : hType === "boulder"
             ? 20
@@ -476,6 +595,9 @@ function updateGame(gs: GameState, _dt: number) {
     const throwDir = Math.random() < 0.5 ? -1 : 1;
     const throwVx = throwDir * (1.5 + Math.random() * 1.0 + gs.level * 0.2);
 
+    const fallsThrough =
+      (hType === "redCandle" && Math.random() < 0.5) ||
+      (hType === "greenCandle" && Math.random() < 0.3);
     gs.hazards.push({
       id: gs.nextHazardId++,
       type: hType,
@@ -489,6 +611,7 @@ function updateGame(gs: GameState, _dt: number) {
       wasOnGround: false,
       rotation: 0,
       frame: 0,
+      fallsThrough,
     });
   }
 
@@ -509,6 +632,7 @@ function updateGame(gs: GameState, _dt: number) {
       h.wasOnGround = h.onGround;
       h.onGround = false;
       for (const plat of gs.currentPlatforms) {
+        if (h.fallsThrough) break; // Phase-through candles ignore platforms
         if (h.x + h.w > plat.x && h.x < plat.x + plat.w) {
           const prevB = h.y + h.h - h.vy;
           if (h.vy >= 0 && prevB <= plat.y + 2 && h.y + h.h >= plat.y) {
@@ -567,22 +691,29 @@ function updateGame(gs: GameState, _dt: number) {
       h.x + h.w / 2 - (p.x + p.w / 2),
       h.y + h.h / 2 - (p.y + p.h / 2),
     );
-    if (dist < 24 && p.hitTimer === 0 && h.type !== "chest") {
+    if (
+      dist < 24 &&
+      p.hitTimer === 0 &&
+      h.type !== "chest" &&
+      h.type !== "greenCandle" &&
+      h.type !== "redCandle"
+    ) {
       gs.saltMeter = Math.min(100, gs.saltMeter + 0.3);
     }
 
-    // Hit detection
+    // Hit detection - skip if level already complete (portal immunity)
+    if (gs.levelComplete) continue;
     if (rectOverlap(p.x + 2, p.y + 2, p.w - 4, p.h - 4, h.x, h.y, h.w, h.h)) {
       // Chest interaction
       if (h.type === "chest") {
         if (gs.hasAxe) {
-          gs.icpModifier = Math.min(2.5, gs.icpModifier + 0.15);
-          gs.score += 2000;
+          gs.portfolioMultiplier = Math.min(2.5, gs.portfolioMultiplier + 0.15);
+          gs.portfolioValue += 2000;
           p.hitTimer = 10;
           gs.sfxQueue.push("axe_smash");
           gs.sfxQueue.push("chest_good");
         } else {
-          gs.icpModifier = Math.max(0.3, gs.icpModifier - 0.12);
+          gs.portfolioMultiplier = Math.max(0.3, gs.portfolioMultiplier - 0.12);
           gs.saltMeter = Math.min(100, gs.saltMeter + 25);
           gs.debuffTimer = 300;
           p.hitTimer = 40;
@@ -592,20 +723,44 @@ function updateGame(gs: GameState, _dt: number) {
         continue;
       }
 
-      // Candle removes axe
-      if (h.type === "candle" && gs.hasAxe && p.hitTimer === 0) {
-        gs.hasAxe = false;
-        gs.axeTimer = 0;
-        gs.saltMeter = Math.min(100, gs.saltMeter + 15);
-        p.hitTimer = 50;
-        gs.sfxQueue.push("axe_swing");
+      // Green candle - boosts portfolio, no damage
+      if (h.type === "greenCandle") {
+        gs.portfolioMultiplier = Math.min(
+          2.5,
+          gs.portfolioMultiplier + 0.08 + Math.random() * 0.04,
+        );
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: h.x,
+          y: h.y - 10,
+          text: "+Portfolio!",
+          timer: 90,
+          color: "#00ff88",
+        });
+        toRemove.push(i);
+        continue;
+      }
+      // Red candle - hurts portfolio, no physical damage
+      if (h.type === "redCandle") {
+        gs.portfolioMultiplier = Math.max(
+          0.3,
+          gs.portfolioMultiplier - 0.06 - Math.random() * 0.04,
+        );
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: h.x,
+          y: h.y - 10,
+          text: "-Portfolio!",
+          timer: 90,
+          color: "#ff4444",
+        });
         toRemove.push(i);
         continue;
       }
 
       // Axe smashes other hazards ONLY when actively swinging
       if (gs.hasAxe && p.attackTimer > 0 && p.hitTimer === 0) {
-        gs.score += 150;
+        gs.portfolioValue += 150;
         gs.sfxQueue.push("axe_swing");
         toRemove.push(i);
         continue;
@@ -636,11 +791,11 @@ function updateGame(gs: GameState, _dt: number) {
   }
 
   // Kool-Aid pickups
-  for (const ka of gs.koolaids) {
+  for (const ka of gs.waterBottles) {
     if (!ka.collected && rectOverlap(p.x, p.y, p.w, p.h, ka.x, ka.y, 12, 18)) {
       ka.collected = true;
       gs.saltMeter = Math.max(0, gs.saltMeter - 30);
-      gs.score += 500;
+      gs.portfolioValue += 500;
       gs.sfxQueue.push("powerup");
     }
   }
@@ -686,6 +841,214 @@ function updateGame(gs: GameState, _dt: number) {
   // Debuff countdown
   if (gs.debuffTimer > 0) gs.debuffTimer--;
 
+  // Gun pickup collection
+  for (const gp of gs.gunPickups) {
+    if (gp.collected) continue;
+    if (rectOverlap(p.x, p.y, p.w, p.h, gp.x, gp.y, 16, 16)) {
+      gp.collected = true;
+      gs.hasGun = true;
+      gs.gunTimer = 500;
+      gs.sfxQueue.push("powerup");
+    }
+  }
+  // Gun countdown
+  if (gs.hasGun) {
+    gs.gunTimer--;
+    if (gs.gunTimer <= 0) {
+      gs.hasGun = false;
+      gs.gunTimer = 0;
+    }
+  }
+
+  // Update bullets
+  const bulletsToRemove: number[] = [];
+  for (let bi = 0; bi < gs.bullets.length; bi++) {
+    const b = gs.bullets[bi];
+    b.x += b.vx;
+    b.lifetime--;
+    if (b.lifetime <= 0 || b.x < -20 || b.x > CANVAS_W + 20) {
+      bulletsToRemove.push(bi);
+      continue;
+    }
+    // Check bullet vs hazards
+    for (let hi = gs.hazards.length - 1; hi >= 0; hi--) {
+      const h2 = gs.hazards[hi];
+      if (rectOverlap(b.x, b.y, b.w, b.h, h2.x, h2.y, h2.w, h2.h)) {
+        gs.portfolioValue += 200;
+        gs.hazards.splice(hi, 1);
+        bulletsToRemove.push(bi);
+        gs.sfxQueue.push("axe_clang");
+        break;
+      }
+    }
+  }
+  for (let i = bulletsToRemove.length - 1; i >= 0; i--) {
+    gs.bullets.splice(bulletsToRemove[i], 1);
+  }
+
+  // Bottom platform pileup - flag hazards to explode/fade
+  const bottomPlatY = Math.max(...gs.currentPlatforms.map((pl) => pl.y));
+  const bottomHazards = gs.hazards.filter(
+    (h) => h.onGround && h.y > bottomPlatY - 30 && !h.flagged,
+  );
+  if (bottomHazards.length > 3) {
+    for (let i = 0; i < Math.min(bottomHazards.length - 2, 3); i++) {
+      const h = bottomHazards[i];
+      h.flagged = Math.random() < 0.5 ? "explode" : "fade";
+      h.flagTimer = 80 + Math.floor(Math.random() * 40);
+    }
+  }
+
+  // Update flagged hazards
+  const flaggedToRemove: number[] = [];
+  for (let i = 0; i < gs.hazards.length; i++) {
+    const h = gs.hazards[i];
+    if (!h.flagged || h.flagTimer === undefined) continue;
+    h.flagTimer--;
+    if (h.flagTimer <= 0) {
+      if (h.flagged === "explode") {
+        const cx = h.x + h.w / 2;
+        const cy = h.y + h.h / 2;
+        for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 5) {
+          const speed = 3 + Math.random() * 2;
+          gs.explosionProjectiles.push({
+            id: gs.nextExplosionId++,
+            x: cx,
+            y: cy,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            lifetime: 50,
+            maxLifetime: 50,
+          });
+        }
+        gs.sfxQueue.push("hit");
+      }
+      flaggedToRemove.push(i);
+    }
+  }
+  for (let i = flaggedToRemove.length - 1; i >= 0; i--) {
+    gs.hazards.splice(flaggedToRemove[i], 1);
+  }
+
+  // Update explosion projectiles
+  const explProjToRemove: number[] = [];
+  for (let ei = 0; ei < gs.explosionProjectiles.length; ei++) {
+    const ep = gs.explosionProjectiles[ei];
+    ep.x += ep.vx;
+    ep.y += ep.vy;
+    ep.vy += GRAVITY * 0.3;
+    ep.lifetime--;
+    if (ep.lifetime <= 0 || ep.x < -50 || ep.x > CANVAS_W + 50) {
+      explProjToRemove.push(ei);
+      continue;
+    }
+    // Damage player if close
+    const epDist = Math.hypot(ep.x - (p.x + p.w / 2), ep.y - (p.y + p.h / 2));
+    if (epDist < 24 && p.hitTimer === 0 && !gs.levelComplete) {
+      gs.saltMeter = Math.min(100, gs.saltMeter + 20);
+      p.hitTimer = 40;
+      gs.sfxQueue.push("hit");
+      loseLife(gs);
+      return;
+    }
+  }
+  for (let i = explProjToRemove.length - 1; i >= 0; i--) {
+    gs.explosionProjectiles.splice(explProjToRemove[i], 1);
+  }
+
+  // Maturity bags spawn
+  gs.maturitySpawnTimer++;
+  if (gs.maturitySpawnTimer >= 240) {
+    gs.maturitySpawnTimer = 0;
+    const platList = gs.currentPlatforms.filter(
+      (pl) => pl.y < CANVAS_H - 50 && pl.y > CANVAS_H - 550,
+    );
+    if (platList.length > 0) {
+      const plat = platList[Math.floor(Math.random() * platList.length)];
+      const amount = Math.floor(
+        gs.portfolioValue * (0.04 + Math.random() * 0.06),
+      );
+      gs.maturityBags.push({
+        id: gs.nextMaturityId++,
+        x: plat.x + 10 + Math.random() * Math.max(0, plat.w - 20),
+        y: plat.y - 18,
+        lifetime: 480,
+        maxLifetime: 480,
+        amount,
+        collected: false,
+      });
+      if (Math.random() < 0.08) {
+        gs.communityBags.push({
+          id: gs.nextMaturityId++,
+          x: plat.x + 20 + Math.random() * Math.max(0, plat.w - 40),
+          y: plat.y - 22,
+          lifetime: 600,
+          maxLifetime: 600,
+          collected: false,
+        });
+      }
+    }
+  }
+
+  // Maturity bag collection
+  for (let mi = gs.maturityBags.length - 1; mi >= 0; mi--) {
+    const mb = gs.maturityBags[mi];
+    if (mb.collected) {
+      gs.maturityBags.splice(mi, 1);
+      continue;
+    }
+    mb.lifetime--;
+    if (mb.lifetime <= 0) {
+      gs.maturityBags.splice(mi, 1);
+      continue;
+    }
+    if (rectOverlap(p.x, p.y, p.w, p.h, mb.x, mb.y, 16, 20)) {
+      mb.collected = true;
+      gs.portfolioValue += mb.amount;
+      gs.floatingTexts.push({
+        id: gs.nextFloatTextId++,
+        x: mb.x,
+        y: mb.y - 10,
+        text: `+$${mb.amount.toLocaleString()}`,
+        timer: 90,
+        color: "#ffd700",
+      });
+      gs.sfxQueue.push("powerup");
+    }
+  }
+  for (let ci = gs.communityBags.length - 1; ci >= 0; ci--) {
+    const cb = gs.communityBags[ci];
+    if (cb.collected) {
+      gs.communityBags.splice(ci, 1);
+      continue;
+    }
+    cb.lifetime--;
+    if (cb.lifetime <= 0) {
+      gs.communityBags.splice(ci, 1);
+      continue;
+    }
+    if (rectOverlap(p.x, p.y, p.w, p.h, cb.x, cb.y, 22, 26)) {
+      cb.collected = true;
+      gs.portfolioValue += 30000;
+      gs.floatingTexts.push({
+        id: gs.nextFloatTextId++,
+        x: cb.x,
+        y: cb.y - 10,
+        text: "+$30,000 GRANT!",
+        timer: 120,
+        color: "#00ff88",
+      });
+      gs.sfxQueue.push("chest_good");
+    }
+  }
+
+  // FloatingText update
+  for (let fi = gs.floatingTexts.length - 1; fi >= 0; fi--) {
+    gs.floatingTexts[fi].timer--;
+    gs.floatingTexts[fi].y -= 0.5;
+    if (gs.floatingTexts[fi].timer <= 0) gs.floatingTexts.splice(fi, 1);
+  }
+
   // Steam particles
   gs.particleTimer = (gs.particleTimer || 0) + 1;
   if (gs.saltMeter > 75 && gs.particleTimer % 4 === 0) {
@@ -708,10 +1071,10 @@ function updateGame(gs: GameState, _dt: number) {
     !gs.levelComplete &&
     rectOverlap(p.x, p.y, p.w, p.h, exit.x - 16, exit.y - 16, 36, 36)
   ) {
-    const allBottlesCollected = gs.koolaids.every((k) => k.collected);
+    const allBottlesCollected = gs.waterBottles.every((k) => k.collected);
     if (allBottlesCollected) {
       gs.levelComplete = true;
-      gs.score += 1000;
+      gs.portfolioValue += 1000;
       gs.sfxQueue.push("level_complete");
     } else {
       gs.bottleWarningTimer = 180;
@@ -1249,9 +1612,14 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillRect(15, 11, 1, 1);
       break;
     }
-    case "candle": {
+    case "redCandle": {
+      // Phase-through candles glow ominously
+      if (h.fallsThrough) {
+        ctx.shadowColor = "#ff00ff";
+        ctx.shadowBlur = 12 + Math.sin(Date.now() * 0.01) * 6;
+      }
       // Wax pool at base
-      ctx.fillStyle = "#991100";
+      ctx.fillStyle = h.fallsThrough ? "#660066" : "#991100";
       ctx.fillRect(1, h.h - 4, h.w - 2, 4);
       // Wax drips on sides
       ctx.fillStyle = "#bb1a00";
@@ -1278,6 +1646,28 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillRect(h.w / 2 - 2, -4 + flameFlicker, 4, 5);
       ctx.fillStyle = "#ffeeaa";
       ctx.fillRect(h.w / 2 - 1, -3 + flameFlicker, 2, 3);
+      break;
+    }
+    case "greenCandle": {
+      if (h.fallsThrough) {
+        ctx.shadowColor = "#00ff88";
+        ctx.shadowBlur = 12 + Math.sin(Date.now() * 0.01) * 6;
+      }
+      ctx.fillStyle = h.fallsThrough ? "#004400" : "#00aa22";
+      ctx.fillRect(1, h.h - 4, h.w - 2, 4);
+      ctx.fillStyle = "#22cc44";
+      ctx.fillRect(3, 4, h.w - 6, h.h - 8);
+      ctx.fillStyle = "#44ff66";
+      ctx.fillRect(4, 5, 4, h.h - 10);
+      ctx.fillStyle = "#009918";
+      ctx.fillRect(h.w - 7, 5, 3, h.h - 10);
+      ctx.fillStyle = "#222222";
+      ctx.fillRect(h.w / 2 - 1, 1, 3, 5);
+      const greenFlameFlicker = Math.sin(Date.now() * 0.02) * 1.5;
+      ctx.fillStyle = "#ffdd00";
+      ctx.fillRect(h.w / 2 - 3, -5 + greenFlameFlicker, 6, 7);
+      ctx.fillStyle = "#ffaa00";
+      ctx.fillRect(h.w / 2 - 2, -4 + greenFlameFlicker, 4, 5);
       break;
     }
     case "pickaxe": {
@@ -1635,7 +2025,7 @@ function drawExit(
   ctx.restore();
 }
 
-function drawKoolAid(
+function drawWaterBottle(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
@@ -1645,12 +2035,12 @@ function drawKoolAid(
   ctx.save();
   ctx.translate(0, bob);
 
-  // Teal glow
-  ctx.shadowColor = "#00e5ff";
+  // Light blue glow
+  ctx.shadowColor = "#81d4fa";
   ctx.shadowBlur = 10;
 
-  // Bottle body (teal with rounded shoulders)
-  ctx.fillStyle = "#00bcd4";
+  // Bottle body (clear/light blue)
+  ctx.fillStyle = "#b3e5fc";
   ctx.fillRect(x + 3, y + 6, 10, 13);
   ctx.fillRect(x + 2, y + 8, 12, 9);
   // Rounded shoulders
@@ -1661,11 +2051,11 @@ function drawKoolAid(
   ctx.shadowBlur = 0;
   ctx.fillRect(x + 3, y + 9, 10, 6);
 
-  // KAS label text
-  ctx.fillStyle = "#006688";
+  // H2O label text
+  ctx.fillStyle = "#0277bd";
   ctx.font = "bold 4px monospace";
   ctx.textAlign = "center";
-  ctx.fillText("KAS", x + 8, y + 14);
+  ctx.fillText("H2O", x + 8, y + 14);
   ctx.textAlign = "left";
 
   // Bottle highlight
@@ -1673,13 +2063,69 @@ function drawKoolAid(
   ctx.fillRect(x + 4, y + 6, 2, 10);
 
   // Cap
-  ctx.shadowColor = "#00e5ff";
+  ctx.shadowColor = "#81d4fa";
   ctx.shadowBlur = 6;
-  ctx.fillStyle = "#ff5722";
+  ctx.fillStyle = "#0288d1";
   ctx.fillRect(x + 4, y, 8, 5);
-  ctx.fillStyle = "#ff8a50";
+  ctx.fillStyle = "#29b6f6";
   ctx.fillRect(x + 5, y, 5, 2);
 
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawMaturityBag(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  lifetime: number,
+  _maxLifetime: number,
+  _amount: number,
+) {
+  if (lifetime < 120 && Math.floor(lifetime / 10) % 2 === 0) return;
+  const bob = Math.sin(Date.now() * 0.006) * 2;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = "#8B6914";
+  ctx.fillRect(1, 8, 14, 12);
+  ctx.fillRect(3, 6, 10, 4);
+  ctx.fillRect(5, 4, 6, 4);
+  ctx.fillStyle = "#c9a227";
+  ctx.fillRect(2, 9, 5, 4);
+  ctx.font = "bold 8px monospace";
+  ctx.fillStyle = "#ffd700";
+  ctx.textAlign = "center";
+  ctx.fillText("$", 8, 17);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawCommunityBag(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  lifetime: number,
+) {
+  if (lifetime < 120 && Math.floor(lifetime / 10) % 2 === 0) return;
+  const bob = Math.sin(Date.now() * 0.005) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#00ff88";
+  ctx.shadowBlur = 16;
+  ctx.fillStyle = "#2e7d32";
+  ctx.fillRect(0, 6, 22, 20);
+  ctx.fillRect(3, 3, 16, 6);
+  ctx.fillRect(7, 0, 8, 5);
+  ctx.fillStyle = "#43a047";
+  ctx.fillRect(2, 8, 8, 6);
+  ctx.font = "bold 9px monospace";
+  ctx.fillStyle = "#00ff88";
+  ctx.textAlign = "center";
+  ctx.fillText("$$", 11, 20);
+  ctx.textAlign = "left";
   ctx.shadowBlur = 0;
   ctx.restore();
 }
@@ -1713,6 +2159,55 @@ function drawAxePickup(
   ctx.fillStyle = "#ffd700";
   ctx.textAlign = "center";
   ctx.fillText("AXE", 8, 28);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawGunPickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.09) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#00ff88";
+  ctx.shadowBlur = 14;
+  // Gun body - silver/gray pixel art pistol
+  ctx.fillStyle = "#aaaaaa";
+  ctx.fillRect(0, 6, 14, 6); // main body
+  ctx.fillStyle = "#cccccc";
+  ctx.fillRect(1, 6, 5, 2); // highlight
+  ctx.fillStyle = "#888888";
+  ctx.fillRect(0, 10, 14, 2); // shadow edge
+  // Barrel
+  ctx.fillStyle = "#999999";
+  ctx.fillRect(14, 7, 6, 3);
+  ctx.fillStyle = "#bbbbbb";
+  ctx.fillRect(14, 7, 6, 1);
+  // Grip
+  ctx.fillStyle = "#775533";
+  ctx.fillRect(2, 12, 7, 8);
+  ctx.fillStyle = "#996644";
+  ctx.fillRect(3, 12, 3, 3);
+  // Trigger
+  ctx.fillStyle = "#666666";
+  ctx.fillRect(7, 10, 2, 4);
+  // Muzzle flash hint
+  ctx.shadowColor = "#ffff00";
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = "#ffcc00";
+  ctx.fillRect(20, 7, 2, 3);
+  ctx.shadowBlur = 0;
+  // Label
+  ctx.shadowColor = "#00ff88";
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#00ff88";
+  ctx.textAlign = "center";
+  ctx.fillText("GUN", 10, 28);
   ctx.textAlign = "left";
   ctx.shadowBlur = 0;
   ctx.restore();
@@ -1924,8 +2419,9 @@ function drawBackground(
 
 function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
   const level = gs.level;
-  const price = ICP_PRICES[level] * gs.icpModifier;
-  const portfolio = price * 10000;
+  const portfolioDisplay = Math.floor(
+    gs.portfolioValue * gs.portfolioMultiplier,
+  );
   const saltPct = gs.saltMeter / 100;
 
   // === LIVES: pixel heart shapes ===
@@ -1962,41 +2458,18 @@ function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
   ctx.fillStyle = "#aa9900";
   ctx.fillText("YEAR", 62, 34);
 
-  // === ICP Price panel ===
-  ctx.fillStyle = "#0a1a2a";
-  ctx.fillRect(112, 6, 82, 38);
-  ctx.strokeStyle = "#4fc3f7";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(112, 6, 82, 38);
-  ctx.font = "7px monospace";
-  ctx.fillStyle = "#4fc3f7";
-  ctx.fillText("ICP PRICE", 116, 17);
-  ctx.font = "bold 12px monospace";
-  ctx.fillStyle = "#4fc3f7";
-  ctx.fillText(`$${price.toFixed(2)}`, 116, 35);
-
-  // === Portfolio panel ===
+  // === Portfolio Value panel (wide) ===
   ctx.fillStyle = "#0a1a0a";
-  ctx.fillRect(200, 6, 96, 38);
+  ctx.fillRect(112, 6, 190, 38);
   ctx.strokeStyle = "#81c784";
   ctx.lineWidth = 1;
-  ctx.strokeRect(200, 6, 96, 38);
+  ctx.strokeRect(112, 6, 190, 38);
   ctx.font = "7px monospace";
   ctx.fillStyle = "#81c784";
-  ctx.fillText("PORTFOLIO", 204, 17);
-  ctx.font = "bold 10px monospace";
+  ctx.fillText("PORTFOLIO VALUE", 116, 17);
+  ctx.font = "bold 12px monospace";
   ctx.fillStyle = "#81c784";
-  ctx.fillText(`$${portfolio.toLocaleString()}`, 204, 35);
-
-  // === Score (right-aligned) ===
-  ctx.font = "bold 10px monospace";
-  ctx.fillStyle = "#ffffff";
-  ctx.textAlign = "right";
-  ctx.fillText(`${gs.score}`, 435, 22);
-  ctx.font = "7px monospace";
-  ctx.fillStyle = "#888888";
-  ctx.fillText("SCORE", 435, 33);
-  ctx.textAlign = "left";
+  ctx.fillText(`$${portfolioDisplay.toLocaleString()}`, 116, 35);
 
   // === Salt Meter: vertical thermometer on far right ===
   const barX = 454;
@@ -2095,24 +2568,24 @@ function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.textAlign = "left";
   }
 
-  // Bottle counter with mini koolaid icon
-  const remaining = gs.koolaids.filter((k) => !k.collected).length;
-  const totalBottles = gs.koolaids.length;
+  // Bottle counter with mini water bottle icon
+  const remaining = gs.waterBottles.filter((k) => !k.collected).length;
+  const totalBottles = gs.waterBottles.length;
   if (totalBottles > 0) {
-    const bx = 304;
+    const bx = 310;
     const by = 8;
-    // Mini kool-aid bottle icon
-    ctx.fillStyle = "#00bcd4";
+    // Mini water bottle icon (light blue)
+    ctx.fillStyle = "#b3e5fc";
     ctx.fillRect(bx + 2, by + 4, 7, 9);
     ctx.fillRect(bx + 1, by + 6, 9, 6);
     ctx.fillRect(bx + 3, by + 2, 5, 4);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(bx + 2, by + 7, 7, 4);
-    ctx.fillStyle = "#ff5722";
+    ctx.fillStyle = "#0288d1";
     ctx.fillRect(bx + 3, by, 5, 3);
     // Count
     ctx.font = "bold 11px monospace";
-    ctx.fillStyle = remaining > 0 ? "#00cfff" : "#81c784";
+    ctx.fillStyle = remaining > 0 ? "#81d4fa" : "#81c784";
     ctx.textAlign = "left";
     ctx.fillText(`x${remaining}/${totalBottles}`, bx + 13, by + 12);
   }
@@ -2342,9 +2815,9 @@ const INTRO_PAGES = [
   {
     title: "THE STORY SO FAR...",
     lines: [
-      "James Salt holds 10,000 ICP.",
+      "James Salt holds a large crypto portfolio.",
       "",
-      "Portfolio value: $200,000",
+      "Portfolio value: $100,000",
       "",
       "He has diamond hands.",
       "James had conviction.",
@@ -2356,9 +2829,9 @@ const INTRO_PAGES = [
     lines: [
       "THE MARKET CRASHES 90%",
       "",
-      "ICP: $20 \u2192 $2",
+      "CRYPTO: -90%",
       "",
-      "Portfolio: $200,000 \u2192 $20,000",
+      "Portfolio: $100,000 → $10,000",
       "",
       "THE EVIL CRYPTO BEAR APPEARS!",
     ],
@@ -2373,24 +2846,25 @@ const INTRO_PAGES = [
       "SALT MINES OF CONVICTION",
       "",
       "Survive 8 years. Reach the",
-      "ICP portal. Escape the mine.",
+      "escape portal. Recover your",
+      "portfolio. Simple.",
     ],
   },
   {
     title: "SURVIVAL BRIEFING",
     lines: [
-      "The Salt Mines run on pure conviction.",
-      "And also Kaspa Kool-Aid.",
+      "In the Salt Mines, dehydration",
+      "is no joke. Doctors call it",
+      "hypernatraemia.",
       "",
-      "Collect ALL blue bottles on each level.",
-      "They're... hydrating. Financially.",
+      "James calls it 'being too salty.'",
+      "",
+      "Collect ALL water bottles each level.",
+      "Your sodium levels demand it.",
       "",
       "Miss even one?",
       "The Crypto Bear keeps your soul.",
       "(And your life. Literally.)",
-      "",
-      "The bear is not joking.",
-      "Neither are we.",
     ],
   },
 ];
@@ -2469,18 +2943,15 @@ function drawYearCompleteScreen(
   ctx.fillText(`YEAR ${level + 1} SURVIVED!`, CANVAS_W / 2, 150);
   ctx.restore();
 
-  const nextPrice = ICP_PRICES[Math.min(level + 1, 7)];
-  const portfolio = nextPrice * 10000;
-
   ctx.font = "13px monospace";
   ctx.fillStyle = "#81c784";
   ctx.textAlign = "center";
-  ctx.fillText(`ICP PRICE RISES TO $${nextPrice}`, CANVAS_W / 2, 210);
-  ctx.fillText(`PORTFOLIO: $${portfolio.toLocaleString()}`, CANVAS_W / 2, 240);
-
-  ctx.font = "11px monospace";
-  ctx.fillStyle = "#ffd700";
-  ctx.fillText(`SCORE: ${score}`, CANVAS_W / 2, 290);
+  ctx.fillText(
+    `PORTFOLIO VALUE: $${score.toLocaleString()}`,
+    CANVAS_W / 2,
+    210,
+  );
+  ctx.fillText("Keep stacking. The mine won't hold you.", CANVAS_W / 2, 240);
 
   if (level < 6) {
     ctx.fillStyle = "#aaa";
@@ -2527,7 +2998,11 @@ function drawGameOverScreen(
 
   ctx.font = "11px monospace";
   ctx.fillStyle = "#aaa";
-  ctx.fillText(`FINAL SCORE: ${score}`, CANVAS_W / 2, 330);
+  ctx.fillText(
+    `FINAL PORTFOLIO: $${score.toLocaleString()}`,
+    CANVAS_W / 2,
+    330,
+  );
   ctx.fillText("THE BEAR WAS RIGHT.", CANVAS_W / 2, 360);
   ctx.fillText("(this time)", CANVAS_W / 2, 382);
 
@@ -2567,7 +3042,7 @@ function drawVictoryScreen(
   ctx.font = "bold 18px monospace";
   ctx.fillStyle = "#4fc3f7";
   ctx.textAlign = "center";
-  ctx.fillText("DIAMOND HANDS PREVAILED!", CANVAS_W / 2, 120);
+  ctx.fillText("PORTFOLIO RECOVERED!", CANVAS_W / 2, 120);
   ctx.restore();
 
   ctx.font = "bold 13px monospace";
@@ -2575,32 +3050,31 @@ function drawVictoryScreen(
   ctx.textAlign = "center";
   ctx.fillText("James Salt escapes the Salt Mines!", CANVAS_W / 2, 170);
 
-  ctx.font = "11px monospace";
-  ctx.fillStyle = "#81c784";
-  ctx.fillText("FINAL ICP PRICE: $150.00", CANVAS_W / 2, 220);
-
   const bonus = 1 + (lives - 1) * 0.15;
-  const finalValue = Math.floor(150 * 10000 * bonus);
+  const finalValue = Math.floor(score * bonus);
   ctx.fillStyle = "#4fc3f7";
   ctx.font = "bold 14px monospace";
   ctx.fillText(
-    `PORTFOLIO VALUE: $${finalValue.toLocaleString()}`,
+    `FINAL PORTFOLIO: $${finalValue.toLocaleString()}`,
     CANVAS_W / 2,
-    260,
+    220,
   );
 
   ctx.fillStyle = "#aaa";
   ctx.font = "10px monospace";
-  ctx.fillText(`SCORE: ${score}`, CANVAS_W / 2, 300);
-  ctx.fillText(`LIVES REMAINING: ${lives}`, CANVAS_W / 2, 320);
-  ctx.fillText(`PERFORMANCE BONUS: x${bonus.toFixed(2)}`, CANVAS_W / 2, 340);
+  ctx.fillText(`LIVES REMAINING: ${lives}`, CANVAS_W / 2, 260);
+  ctx.fillText(`PERFORMANCE BONUS: x${bonus.toFixed(2)}`, CANVAS_W / 2, 280);
 
   ctx.font = "12px monospace";
   ctx.fillStyle = "#ff9800";
-  ctx.fillText('"Never sold. Never doubted."', CANVAS_W / 2, 390);
+  ctx.fillText(
+    '"Never sold. Never doubted. Never showered."',
+    CANVAS_W / 2,
+    340,
+  );
   ctx.fillStyle = "#888";
   ctx.font = "10px monospace";
-  ctx.fillText("      - James Salt", CANVAS_W / 2, 412);
+  ctx.fillText("      - James Salt", CANVAS_W / 2, 362);
 
   if (Math.floor(frame / 30) % 2 === 0) {
     ctx.font = "bold 11px monospace";
@@ -2626,17 +3100,31 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     return;
   }
   if (gs.screen === "YEAR_COMPLETE") {
-    drawYearCompleteScreen(ctx, gs.level, gs.score, gs.frameCount);
+    drawYearCompleteScreen(
+      ctx,
+      gs.level,
+      Math.floor(gs.portfolioValue * gs.portfolioMultiplier),
+      gs.frameCount,
+    );
     ctx.restore();
     return;
   }
   if (gs.screen === "GAME_OVER") {
-    drawGameOverScreen(ctx, gs.score, gs.frameCount);
+    drawGameOverScreen(
+      ctx,
+      Math.floor(gs.portfolioValue * gs.portfolioMultiplier),
+      gs.frameCount,
+    );
     ctx.restore();
     return;
   }
   if (gs.screen === "VICTORY") {
-    drawVictoryScreen(ctx, gs.score, gs.lives, gs.frameCount);
+    drawVictoryScreen(
+      ctx,
+      Math.floor(gs.portfolioValue * gs.portfolioMultiplier),
+      gs.lives,
+      gs.frameCount,
+    );
     ctx.restore();
     return;
   }
@@ -2663,14 +3151,90 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
   const exit = level.exitPosition;
   drawExit(ctx, exit.x, exit.y, gs.frameCount);
 
-  // Kool-Aids
-  for (const ka of gs.koolaids) {
-    if (!ka.collected) drawKoolAid(ctx, ka.x, ka.y, gs.frameCount);
+  // Water Bottles
+  for (const wb of gs.waterBottles) {
+    if (!wb.collected) drawWaterBottle(ctx, wb.x, wb.y, gs.frameCount);
   }
 
   // Hazards
   for (const h of gs.hazards) {
     drawHazard(ctx, h);
+    // Flagged hazard warning overlay
+    if (h.flagged && h.flagTimer !== undefined) {
+      const flashRate = h.flagTimer < 40 ? 4 : 12;
+      if (Math.floor(h.flagTimer / flashRate) % 2 === 0) {
+        ctx.save();
+        ctx.globalAlpha = 0.65;
+        ctx.fillStyle = h.flagged === "explode" ? "#ff3300" : "#cccccc";
+        ctx.fillRect(h.x, h.y, h.w, h.h);
+        ctx.globalAlpha = 1;
+        if (h.flagged === "explode") {
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "bold 9px monospace";
+          ctx.textAlign = "center";
+          ctx.fillText("💥", h.x + h.w / 2, h.y + h.h / 2 + 3);
+        }
+        ctx.restore();
+      }
+    }
+  }
+
+  // Maturity bags
+  for (const mb of gs.maturityBags) {
+    if (!mb.collected)
+      drawMaturityBag(ctx, mb.x, mb.y, mb.lifetime, mb.maxLifetime, mb.amount);
+  }
+  // Community bags
+  for (const cb of gs.communityBags) {
+    if (!cb.collected) drawCommunityBag(ctx, cb.x, cb.y, cb.lifetime);
+  }
+
+  // Bullets
+  for (const b of gs.bullets) {
+    ctx.save();
+    ctx.shadowColor = "#ffcc00";
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#ffee00";
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(b.x, b.y + 1, 4, b.h - 2);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // Explosion projectiles
+  for (const ep of gs.explosionProjectiles) {
+    const alpha = ep.lifetime / ep.maxLifetime;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.shadowColor = "#ff6600";
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = "#ff4400";
+    ctx.fillRect(ep.x - 4, ep.y - 4, 8, 8);
+    ctx.fillStyle = "#ffcc00";
+    ctx.fillRect(ep.x - 2, ep.y - 2, 4, 4);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // Floating texts
+  for (const ft of gs.floatingTexts) {
+    const alpha = Math.min(1, ft.timer / 30);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.shadowColor = ft.color;
+    ctx.shadowBlur = 8;
+    ctx.font = "bold 10px monospace";
+    ctx.fillStyle = ft.color;
+    ctx.textAlign = "center";
+    ctx.fillText(ft.text, ft.x, ft.y);
+    ctx.textAlign = "left";
+    ctx.restore();
+  }
+
+  // Gun pickups
+  for (const gp of gs.gunPickups) {
+    if (!gp.collected) drawGunPickup(ctx, gp.x, gp.y, gs.frameCount);
   }
 
   // Bear
@@ -2678,7 +3242,7 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
   drawBear(
     ctx,
     gs.bearX - 10,
-    bear.y - 40,
+    bear.y - 10,
     gs.bearArmRaise,
     gs.bearThrowAnim,
     gs.bearWalkFrame,
@@ -2730,7 +3294,7 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.font = "bold 18px monospace";
     ctx.fillStyle = "#ff4444";
     ctx.textAlign = "center";
-    ctx.fillText("COLLECT ALL BLUE BOTTLES FIRST!", CANVAS_W / 2, 95);
+    ctx.fillText("COLLECT ALL WATER BOTTLES FIRST!", CANVAS_W / 2, 95);
     ctx.restore();
   }
 
@@ -2752,13 +3316,15 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
 interface HudData {
   lives: number;
   level: number;
-  score: number;
+  portfolioValue: number;
   saltMeter: number;
   hasAxe: boolean;
   axeTimer: number;
+  hasGun: boolean;
+  gunTimer: number;
   bottlesLeft: number;
   totalBottles: number;
-  icpModifier: number;
+  portfolioMultiplier: number;
 }
 
 export default function Game() {
@@ -2768,16 +3334,22 @@ export default function Game() {
     introPage: 0,
     level: 0,
     lives: 3,
-    score: 0,
+    portfolioValue: 10000,
     saltMeter: 0,
     player: makePlayer(0),
     hazards: [],
-    koolaids: [],
+    waterBottles: [],
     spawnerStates: [],
     hasAxe: false,
     axeTimer: 0,
     axePickups: [],
-    icpModifier: 1.0,
+    portfolioMultiplier: 1.0,
+    maturityBags: [],
+    communityBags: [],
+    floatingTexts: [],
+    maturitySpawnTimer: 0,
+    nextMaturityId: 1,
+    nextFloatTextId: 1,
     debuffTimer: 0,
     bearThrowTimer: 0,
     nextHazardId: 1,
@@ -2798,6 +3370,14 @@ export default function Game() {
     bearX: 200,
     bearDir: 1,
     bearWalkFrame: 0,
+    hasGun: false,
+    gunTimer: 0,
+    gunCooldown: 0,
+    gunPickups: [],
+    bullets: [],
+    nextBulletId: 1,
+    explosionProjectiles: [],
+    nextExplosionId: 1,
   });
   const rafRef = useRef<number>(0);
   const prevScreenRef = useRef<GameScreen>("TITLE");
@@ -2817,6 +3397,8 @@ export default function Game() {
   const gamepadIndexRef = useRef<number>(-1);
   const [hasAxeDisplay, setHasAxeDisplay] = useState(false);
   const hasAxeDisplayRef = useRef(false);
+  const [hasGunDisplay, setHasGunDisplay] = useState(false);
+  const hasGunDisplayRef = useRef(false);
   const prevBtnARef = useRef(false);
   const sfxRef = useRef<{ play: (e: string) => void } | null>(null);
   const sfxAudioCtxRef = useRef<AudioContext | null>(null);
@@ -2831,13 +3413,15 @@ export default function Game() {
   const [hudData, setHudData] = useState<HudData>({
     lives: 3,
     level: 0,
-    score: 0,
+    portfolioValue: 10000,
     saltMeter: 0,
     hasAxe: false,
     axeTimer: 600,
+    hasGun: false,
+    gunTimer: 0,
     bottlesLeft: 0,
     totalBottles: 0,
-    icpModifier: 1.0,
+    portfolioMultiplier: 1.0,
   });
 
   // toggleMusicMute kept for future use
@@ -2925,15 +3509,19 @@ export default function Game() {
     gs.introPage = 0;
     gs.level = 0;
     gs.lives = 3;
-    gs.score = 0;
+    gs.portfolioValue = 0;
     gs.saltMeter = 0;
     gs.hazards = [];
-    gs.koolaids = [];
+    gs.waterBottles = [];
     gs.spawnerStates = [];
     gs.hasAxe = false;
     gs.axeTimer = 0;
     gs.axePickups = [];
-    gs.icpModifier = 1.0;
+    gs.portfolioMultiplier = 1.0;
+    gs.maturityBags = [];
+    gs.communityBags = [];
+    gs.floatingTexts = [];
+    gs.maturitySpawnTimer = 0;
     gs.debuffTimer = 0;
     gs.bearThrowTimer = 0;
     gs.currentPlatforms = [];
@@ -3081,7 +3669,9 @@ export default function Game() {
       if (gs.screen !== prevScreenRef.current) {
         prevScreenRef.current = gs.screen;
         if (gs.screen === "GAME_OVER" || gs.screen === "VICTORY") {
-          setPendingScore(gs.score);
+          setPendingScore(
+            Math.floor(gs.portfolioValue * gs.portfolioMultiplier),
+          );
           setShowNameEntry(true);
           setNameInput("");
         }
@@ -3090,20 +3680,26 @@ export default function Game() {
         hasAxeDisplayRef.current = gs.hasAxe;
         setHasAxeDisplay(gs.hasAxe);
       }
+      if (gs.hasGun !== hasGunDisplayRef.current) {
+        hasGunDisplayRef.current = gs.hasGun;
+        setHasGunDisplay(gs.hasGun);
+      }
       // Update HUD data every frame (React batches these efficiently)
       if (gs.frameCount % 3 === 0) {
-        const bottlesLeft = gs.koolaids.filter((k) => !k.collected).length;
-        const totalBottles = gs.koolaids.length;
+        const bottlesLeft = gs.waterBottles.filter((k) => !k.collected).length;
+        const totalBottles = gs.waterBottles.length;
         setHudData({
           lives: gs.lives,
           level: gs.level,
-          score: gs.score,
+          portfolioValue: gs.portfolioValue,
           saltMeter: gs.saltMeter,
           hasAxe: gs.hasAxe,
           axeTimer: gs.axeTimer,
+          hasGun: gs.hasGun,
+          gunTimer: gs.gunTimer,
           bottlesLeft,
           totalBottles,
-          icpModifier: gs.icpModifier,
+          portfolioMultiplier: gs.portfolioMultiplier,
         });
       }
       rafRef.current = requestAnimationFrame(loop);
@@ -3160,9 +3756,6 @@ export default function Game() {
     },
     [handleSpace],
   );
-
-  const icpPrice = ICP_PRICES[hudData.level] * hudData.icpModifier;
-  const portfolio = icpPrice * 10000;
 
   return (
     <div
@@ -3230,30 +3823,30 @@ export default function Game() {
           YR {hudData.level + 1}/8
         </div>
 
-        {/* ICP Price */}
-        <div style={{ color: "#4fc3f7", fontSize: 10, minWidth: 60 }}>
-          ICP ${icpPrice.toFixed(2)}
-        </div>
-
-        {/* Portfolio */}
-        <div style={{ color: "#81c784", fontSize: 10, minWidth: 70 }}>
-          ${portfolio.toLocaleString()}
-        </div>
-
-        {/* Score */}
-        <div style={{ color: "#ffffff", fontSize: 10, minWidth: 40 }}>
-          {hudData.score}
+        {/* Portfolio Value */}
+        <div
+          style={{
+            color: "#81c784",
+            fontSize: 10,
+            minWidth: 100,
+            fontWeight: "bold",
+          }}
+        >
+          $
+          {Math.floor(
+            hudData.portfolioValue * hudData.portfolioMultiplier,
+          ).toLocaleString()}
         </div>
 
         {/* Bottles - using teal bottle icon */}
         <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
           <svg aria-hidden="true" width="10" height="18" viewBox="0 0 16 22">
             {/* Cap */}
-            <rect x="4" y="0" width="8" height="5" fill="#ff5722" />
+            <rect x="4" y="0" width="8" height="5" fill="#0288d1" />
             {/* Bottle body */}
-            <rect x="3" y="6" width="10" height="13" fill="#00bcd4" />
-            <rect x="2" y="8" width="12" height="9" fill="#00bcd4" />
-            <rect x="4" y="4" width="8" height="5" fill="#00bcd4" />
+            <rect x="3" y="6" width="10" height="13" fill="#b3e5fc" />
+            <rect x="2" y="8" width="12" height="9" fill="#b3e5fc" />
+            <rect x="4" y="4" width="8" height="5" fill="#b3e5fc" />
             {/* Label */}
             <rect x="3" y="9" width="10" height="6" fill="#ffffff" />
             {/* Highlight */}
@@ -3265,7 +3858,7 @@ export default function Game() {
               fill="rgba(255,255,255,0.5)"
             />
           </svg>
-          <span style={{ color: "#00bcd4", fontSize: 10 }}>
+          <span style={{ color: "#81d4fa", fontSize: 10 }}>
             {hudData.totalBottles - hudData.bottlesLeft}/{hudData.totalBottles}
           </span>
         </div>
@@ -3321,6 +3914,35 @@ export default function Game() {
                         ? "#ffd700"
                         : "#ff4444"
                       : "#ffd700",
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Gun timer bar (only when holding gun) */}
+        {hudData.hasGun && (
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            <span style={{ color: "#00ff88", fontSize: 9 }}>🔫</span>
+            <div
+              style={{
+                width: 30,
+                height: 8,
+                background: "#1a1a1a",
+                border: "1px solid #666",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${Math.min(100, (hudData.gunTimer / 500) * 100)}%`,
+                  height: "100%",
+                  background:
+                    hudData.gunTimer < 100
+                      ? Math.floor(Date.now() / 200) % 2 === 0
+                        ? "#00ff88"
+                        : "#ff4444"
+                      : "#00ff88",
                 }}
               />
             </div>
@@ -3572,15 +4194,21 @@ export default function Game() {
                 height: 44,
                 background: hasAxeDisplay
                   ? "rgba(255,200,50,0.25)"
-                  : "rgba(255,255,255,0.1)",
-                border: `2px solid ${hasAxeDisplay ? "rgba(255,200,50,0.6)" : "rgba(255,255,255,0.2)"}`,
+                  : hasGunDisplay
+                    ? "rgba(0,255,136,0.15)"
+                    : "rgba(255,255,255,0.1)",
+                border: `2px solid ${hasAxeDisplay ? "rgba(255,200,50,0.6)" : hasGunDisplay ? "rgba(0,255,136,0.6)" : "rgba(255,255,255,0.2)"}`,
                 borderRadius: 10,
                 cursor: "pointer",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 gap: 4,
-                color: hasAxeDisplay ? "#ffc832" : "rgba(255,255,255,0.4)",
+                color: hasAxeDisplay
+                  ? "#ffc832"
+                  : hasGunDisplay
+                    ? "#00ff88"
+                    : "rgba(255,255,255,0.4)",
                 fontFamily: "monospace",
                 fontSize: 12,
                 fontWeight: "bold",
@@ -3589,7 +4217,9 @@ export default function Game() {
                 WebkitTouchCallout: "none",
               }}
             >
-              <span aria-hidden>⛏</span>
+              <span aria-hidden>
+                {hasGunDisplay && !hasAxeDisplay ? "🔫" : "⛏"}
+              </span>
               <span aria-hidden>B</span>
             </button>
 
@@ -3703,7 +4333,7 @@ export default function Game() {
                 : "GAME OVER"}
             </div>
             <div style={{ fontSize: 12, color: "#aaa" }}>
-              SCORE: {pendingScore.toLocaleString()}
+              PORTFOLIO: ${pendingScore.toLocaleString()}
             </div>
 
             <div style={{ fontSize: 13, color: "#ffd700", marginTop: 8 }}>
@@ -3777,7 +4407,7 @@ export default function Game() {
                   fontFamily: "monospace",
                 }}
               >
-                {String(i + 1).padStart(2, " ")}. {entry.name.padEnd(12, " ")}{" "}
+                {String(i + 1).padStart(2, " ")}. {entry.name.padEnd(12, " ")} $
                 {entry.score.toLocaleString()}
               </div>
             ))}
