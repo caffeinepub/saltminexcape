@@ -1387,11 +1387,16 @@ function drawPlayer(
 
     // --- ARMS ---
     if (state === "jump") {
+      // Arms raised high for jumping pose
       ctx.fillStyle = skinTone;
-      ctx.fillRect(-4, 4, 5, 10);
-      ctx.fillRect(23, 4, 5, 10);
+      ctx.fillRect(-5, 0, 5, 12);
+      ctx.fillRect(24, 0, 5, 12);
       ctx.fillStyle = skinShade;
-      ctx.fillRect(-4, 4, 2, 10);
+      ctx.fillRect(-5, 0, 2, 12);
+      // Sleeves pulled up when arms raised
+      ctx.fillStyle = shirtBase;
+      ctx.fillRect(-5, 0, 5, 3);
+      ctx.fillRect(24, 0, 5, 3);
     } else if (state === "victory") {
       ctx.fillStyle = skinTone;
       ctx.fillRect(-4, 2, 5, 12);
@@ -1504,32 +1509,31 @@ function drawPlayer(
     ctx.restore();
   } else if (hasAxe) {
     const shouldShowAxe = axeTimer > 120 || Math.floor(axeTimer / 10) % 2 === 0;
-    if (!shouldShowAxe) {
+    if (shouldShowAxe) {
+      ctx.save();
+      ctx.shadowColor = "#ffd700";
+      ctx.shadowBlur = 8;
+      if (state === "run") {
+        ctx.fillStyle = "#8B5E3C";
+        ctx.fillRect(17, 10, 3, 10);
+        ctx.fillStyle = "#aaaaaa";
+        ctx.fillRect(18, 3, 10, 7);
+        ctx.fillRect(22, 1, 6, 10);
+        ctx.fillStyle = "#cccccc";
+        ctx.fillRect(19, 3, 4, 3);
+      } else {
+        ctx.fillStyle = "#8B5E3C";
+        ctx.fillRect(22, 5, 3, 12);
+        ctx.fillStyle = "#aaaaaa";
+        ctx.fillRect(16, -2, 14, 8);
+        ctx.fillRect(22, -5, 6, 10);
+        ctx.fillStyle = "#cccccc";
+        ctx.fillRect(17, -1, 5, 3);
+      }
+      ctx.shadowBlur = 0;
       ctx.restore();
-      return;
     }
-    ctx.save();
-    ctx.shadowColor = "#ffd700";
-    ctx.shadowBlur = 8;
-    if (state === "run") {
-      ctx.fillStyle = "#8B5E3C";
-      ctx.fillRect(17, 10, 3, 10);
-      ctx.fillStyle = "#aaaaaa";
-      ctx.fillRect(18, 3, 10, 7);
-      ctx.fillRect(22, 1, 6, 10);
-      ctx.fillStyle = "#cccccc";
-      ctx.fillRect(19, 3, 4, 3);
-    } else {
-      ctx.fillStyle = "#8B5E3C";
-      ctx.fillRect(22, 5, 3, 12);
-      ctx.fillStyle = "#aaaaaa";
-      ctx.fillRect(16, -2, 14, 8);
-      ctx.fillRect(22, -5, 6, 10);
-      ctx.fillStyle = "#cccccc";
-      ctx.fillRect(17, -1, 5, 3);
-    }
-    ctx.shadowBlur = 0;
-    ctx.restore();
+    // fall through to outer ctx.restore() below - stack always balanced
   }
 
   ctx.restore();
@@ -1617,17 +1621,24 @@ function drawBear(
     ctx.fillRect(36 + thrustFwd, 14 + armExt, 8, 8);
     ctx.restore();
     // Roar expression on throw (mouth wide open, eyes narrowed)
-    if (!isWindup) {
+    {
       ctx.save();
       ctx.shadowColor = "#ff4400";
-      ctx.shadowBlur = 10;
-      // Extra rage indicators - jagged lines from eyes
-      ctx.strokeStyle = "#ff6600";
-      ctx.lineWidth = 1.5;
-      for (let ri = 0; ri < 3; ri++) {
+      ctx.shadowBlur = isWindup ? 6 : 12;
+      // Anger lines radiating from face - more intense on throw release
+      ctx.strokeStyle = isWindup ? "#ff8800" : "#ff3300";
+      ctx.lineWidth = isWindup ? 1 : 1.5;
+      const lineCount = isWindup ? 3 : 5;
+      for (let ri = 0; ri < lineCount; ri++) {
+        const angle = (ri / lineCount) * Math.PI - Math.PI * 0.15;
+        const bx2 = 18 + Math.cos(angle) * 4;
+        const by2 = 8 + Math.sin(angle) * 4;
         ctx.beginPath();
-        ctx.moveTo(11 + ri * 9, 6);
-        ctx.lineTo(7 + ri * 9, 1);
+        ctx.moveTo(bx2, by2);
+        ctx.lineTo(
+          bx2 + Math.cos(angle) * (isWindup ? 6 : 10),
+          by2 + Math.sin(angle) * (isWindup ? 5 : 9),
+        );
         ctx.stroke();
       }
       ctx.restore();
@@ -1723,6 +1734,23 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
   ctx.translate(h.x + h.w / 2, h.y + h.h / 2);
   ctx.rotate(h.rotation);
   ctx.translate(-h.w / 2, -h.h / 2);
+
+  // Hazard-type glow
+  if (
+    h.type === "boulder" ||
+    h.type === "cart" ||
+    h.type === "saltbag" ||
+    h.type === "barrel"
+  ) {
+    ctx.shadowColor = "#ff8800";
+    ctx.shadowBlur = 8;
+  } else if (h.type === "greenCandle") {
+    ctx.shadowColor = "#00ff44";
+    ctx.shadowBlur = 14;
+  } else if (h.type === "redCandle") {
+    ctx.shadowColor = "#ff2200";
+    ctx.shadowBlur = 14;
+  }
 
   switch (h.type) {
     case "boulder": {
@@ -2066,13 +2094,17 @@ function drawPlatform(
   ctx.fillStyle = bodyColor;
   ctx.fillRect(x, y, w, h);
 
-  // Darker bottom edge (shadow)
-  ctx.fillStyle = "rgba(0,0,0,0.35)";
-  ctx.fillRect(x, y + h - 3, w, 3);
+  // Darker bottom edge (shadow) - strong underside for depth
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(x, y + h - 4, w, 4);
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect(x - 1, y + h, w + 2, 3);
 
-  // Lighter top edge (highlight)
-  ctx.fillStyle = "rgba(255,255,255,0.18)";
-  ctx.fillRect(x, y, w, 2);
+  // Lighter top edge (highlight) - bright ridge for 3D depth
+  ctx.fillStyle = "rgba(255,255,255,0.32)";
+  ctx.fillRect(x, y, w, 1);
+  ctx.fillStyle = "rgba(255,255,255,0.14)";
+  ctx.fillRect(x, y + 1, w, 2);
 
   // Wood grain lines (horizontal streaks across surface)
   ctx.strokeStyle = "rgba(0,0,0,0.22)";
@@ -2224,9 +2256,9 @@ function drawWaterBottle(
   ctx.save();
   ctx.translate(0, bob);
 
-  // Light blue glow
-  ctx.shadowColor = "#81d4fa";
-  ctx.shadowBlur = 10;
+  // Light blue shimmer glow - enhanced so it pops on dark backgrounds
+  ctx.shadowColor = "#4fc3f7";
+  ctx.shadowBlur = 14 + Math.sin(frame * 0.12) * 4;
 
   // Bottle body (clear/light blue)
   ctx.fillStyle = "#b3e5fc";
@@ -2785,8 +2817,22 @@ function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
   ctx.fillStyle = "#81c784";
   ctx.fillText("PORTFOLIO VALUE", 116, 17);
   ctx.font = "bold 12px monospace";
-  ctx.fillStyle = "#81c784";
+  // Color the portfolio value: red when low, yellow mid, green when thriving
+  if (portfolioDisplay < 10000) {
+    ctx.fillStyle = "#ff4444";
+    ctx.shadowColor = "#ff0000";
+    ctx.shadowBlur = 6;
+  } else if (portfolioDisplay < 50000) {
+    ctx.fillStyle = "#ffd700";
+    ctx.shadowColor = "#ffaa00";
+    ctx.shadowBlur = 5;
+  } else {
+    ctx.fillStyle = "#81c784";
+    ctx.shadowColor = "#00ff44";
+    ctx.shadowBlur = 5;
+  }
   ctx.fillText(`$${portfolioDisplay.toLocaleString()}`, 116, 35);
+  ctx.shadowBlur = 0;
 
   // === Salt Meter: vertical thermometer on far right ===
   const barX = 454;
@@ -3449,10 +3495,10 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
   // --- PLAYING ---
   const level = LEVELS[gs.level];
 
-  // Screen shake
+  // Screen shake - ALWAYS save to keep stack balanced
+  ctx.save();
   if (gs.screenShake > 0) {
     const shakeAmt = gs.screenShake * 0.8;
-    ctx.save();
     ctx.translate(
       (Math.random() - 0.5) * shakeAmt,
       (Math.random() - 0.5) * shakeAmt,
@@ -3657,10 +3703,8 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.restore();
   }
 
-  // End screen shake transform
-  if (gs.screenShake > 0) {
-    ctx.restore();
-  }
+  // End screen shake transform - ALWAYS restore to match unconditional save above
+  ctx.restore();
 
   // Bottle warning overlay
   if (gs.bottleWarningTimer > 0) {
