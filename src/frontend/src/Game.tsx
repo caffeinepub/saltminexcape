@@ -1780,7 +1780,6 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillRect(h.w / 2 - 1, 1, 2, h.h / 2 - 2);
       ctx.fillStyle = "#aaaacc";
       ctx.fillRect(1, h.h / 2 - 1, h.w / 2 - 2, 2);
-      ctx.restore();
       break;
     }
     case "redCandle": {
