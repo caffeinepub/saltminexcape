@@ -204,6 +204,20 @@ interface GameState {
     alpha: number;
   }[];
   screenShake: number;
+  portfolioTickerFlash: number;
+  portfolioTickerDir: 1 | -1;
+  bearTauntTimer: number;
+  damageFlashTimer: number;
+  portfolioFlashGreenTimer: number;
+  ambientParticles: {
+    type: "dust" | "drip" | "ember" | "ash";
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    alpha: number;
+    size?: number;
+  }[];
 }
 
 const PLAYER_W = 24;
@@ -270,6 +284,12 @@ function initLevel(gs: GameState, levelIdx: number) {
   gs.sparkParticles = [];
   gs.coinParticles = [];
   gs.screenShake = 0;
+  gs.portfolioTickerFlash = 0;
+  gs.portfolioTickerDir = 1;
+  gs.bearTauntTimer = 0;
+  gs.damageFlashTimer = 0;
+  gs.portfolioFlashGreenTimer = 0;
+  gs.ambientParticles = [];
 
   // Generate random platforms for this level run
   gs.currentPlatforms = generateRandomPlatforms(levelIdx);
@@ -363,6 +383,10 @@ function updateGame(gs: GameState, _dt: number) {
   // Bear throw animation countdown
   if (gs.bearThrowAnim > 0) gs.bearThrowAnim--;
   gs.frameCount++;
+  if (gs.portfolioTickerFlash > 0) gs.portfolioTickerFlash--;
+  if (gs.bearTauntTimer > 0) gs.bearTauntTimer--;
+  if (gs.damageFlashTimer > 0) gs.damageFlashTimer--;
+  if (gs.portfolioFlashGreenTimer > 0) gs.portfolioFlashGreenTimer--;
 
   // Bear walking across top platform
   const BEAR_PLATFORM_LEFT = 75;
@@ -433,6 +457,8 @@ function updateGame(gs: GameState, _dt: number) {
         if (h.type === "chest") {
           gs.portfolioMultiplier = Math.min(2.5, gs.portfolioMultiplier + 0.15);
           gs.portfolioValue += 2000;
+          gs.portfolioTickerFlash = 40;
+          gs.portfolioTickerDir = 1;
           gs.sfxQueue.push("chest_good");
         } else if (h.type !== "greenCandle" && h.type !== "redCandle") {
           gs.portfolioValue += 150;
@@ -765,6 +791,8 @@ function updateGame(gs: GameState, _dt: number) {
           gs.sfxQueue.push("chest_good");
         } else {
           gs.portfolioMultiplier = Math.max(0.3, gs.portfolioMultiplier - 0.12);
+          gs.portfolioTickerFlash = 40;
+          gs.portfolioTickerDir = -1;
           gs.saltMeter = Math.min(100, gs.saltMeter + 25);
           gs.debuffTimer = 300;
           p.hitTimer = 40;
@@ -780,6 +808,7 @@ function updateGame(gs: GameState, _dt: number) {
           2.5,
           gs.portfolioMultiplier + 0.08 + Math.random() * 0.04,
         );
+        gs.portfolioFlashGreenTimer = 12;
         gs.floatingTexts.push({
           id: gs.nextFloatTextId++,
           x: h.x,
@@ -819,6 +848,7 @@ function updateGame(gs: GameState, _dt: number) {
 
       // Salt bag - big salt meter hit but no life lost
       if (h.type === "saltbag" && p.hitTimer === 0) {
+        gs.damageFlashTimer = 10;
         gs.saltMeter = Math.min(100, gs.saltMeter + 35);
         gs.debuffTimer = 180;
         p.hitTimer = 50;
@@ -829,6 +859,7 @@ function updateGame(gs: GameState, _dt: number) {
 
       // Normal hit
       if (p.hitTimer === 0) {
+        gs.damageFlashTimer = 10;
         gs.saltMeter = Math.min(100, gs.saltMeter + 15);
         p.hitTimer = 60;
         gs.sfxQueue.push("hit");
@@ -1069,6 +1100,9 @@ function updateGame(gs: GameState, _dt: number) {
     if (rectOverlap(p.x, p.y, p.w, p.h, mb.x, mb.y, 16, 20)) {
       mb.collected = true;
       gs.portfolioValue += mb.amount;
+      gs.portfolioFlashGreenTimer = 12;
+      gs.portfolioTickerFlash = 40;
+      gs.portfolioTickerDir = 1;
       gs.floatingTexts.push({
         id: gs.nextFloatTextId++,
         x: mb.x,
@@ -1105,6 +1139,9 @@ function updateGame(gs: GameState, _dt: number) {
     if (rectOverlap(p.x, p.y, p.w, p.h, cb.x, cb.y, 22, 26)) {
       cb.collected = true;
       gs.portfolioValue += 30000;
+      gs.portfolioFlashGreenTimer = 12;
+      gs.portfolioTickerFlash = 40;
+      gs.portfolioTickerDir = 1;
       gs.floatingTexts.push({
         id: gs.nextFloatTextId++,
         x: cb.x,
@@ -1168,6 +1205,76 @@ function updateGame(gs: GameState, _dt: number) {
     sp.alpha -= 0.02;
   }
 
+  // Ambient atmosphere particles based on level year
+  {
+    const levelYear = gs.level; // 0-7
+    if (levelYear <= 1) {
+      // Dust motes
+      if (gs.particleTimer % 8 === 0) {
+        gs.ambientParticles.push({
+          type: "dust",
+          x: Math.random() * 480,
+          y: -10,
+          vx: (Math.random() - 0.5) * 0.4,
+          vy: 0.3 + Math.random() * 0.3,
+          alpha: 0.4 + Math.random() * 0.3,
+          size: 1 + Math.random() * 2,
+        });
+      }
+    } else if (levelYear <= 3) {
+      // Water drips
+      if (gs.particleTimer % 20 === 0) {
+        gs.ambientParticles.push({
+          type: "drip",
+          x: Math.random() * 480,
+          y: -5,
+          vx: 0,
+          vy: 1.5 + Math.random() * 1.5,
+          alpha: 0.7,
+          size: 2,
+        });
+      }
+    } else if (levelYear <= 5) {
+      // Embers rising
+      if (gs.particleTimer % 6 === 0) {
+        gs.ambientParticles.push({
+          type: "ember",
+          x: Math.random() * 480,
+          y: 650,
+          vx: (Math.random() - 0.5) * 1.2,
+          vy: -(1 + Math.random() * 2),
+          alpha: 0.8 + Math.random() * 0.2,
+          size: 1 + Math.random() * 2,
+        });
+      }
+    } else {
+      // Ash/embers hellscape
+      if (gs.particleTimer % 4 === 0) {
+        gs.ambientParticles.push({
+          type: "ash",
+          x: Math.random() * 480,
+          y: -10,
+          vx: (Math.random() - 0.5) * 0.8,
+          vy: 0.4 + Math.random() * 0.8,
+          alpha: 0.5 + Math.random() * 0.3,
+          size: 1 + Math.random() * 3,
+        });
+      }
+    }
+    // Update ambient particles
+    gs.ambientParticles = gs.ambientParticles.filter(
+      (ap) =>
+        ap.alpha > 0 && ap.y > -20 && ap.y < 680 && ap.x > -10 && ap.x < 500,
+    );
+    for (const ap of gs.ambientParticles) {
+      ap.x += ap.vx;
+      ap.y += ap.vy;
+      if (ap.type === "dust" || ap.type === "ash") ap.alpha -= 0.003;
+      else if (ap.type === "drip") ap.alpha -= 0.008;
+      else ap.alpha -= 0.005;
+    }
+  }
+
   // Exit check
   const exit = level.exitPosition;
   if (
@@ -1198,6 +1305,7 @@ function updateGame(gs: GameState, _dt: number) {
 }
 
 function loseLife(gs: GameState) {
+  gs.bearTauntTimer = 60;
   gs.lives--;
   if (gs.lives <= 0) {
     gs.sfxQueue.push("game_over");
@@ -1218,6 +1326,8 @@ function drawPlayer(
   hasAxe: boolean,
   axeTimer = 600,
   dyingTimer = 0,
+  hasGun = false,
+  gunTimer = 600,
 ) {
   const { x, y, facing, state, hitTimer, frame } = p;
   const flipped = facing === -1;
@@ -1230,6 +1340,31 @@ function drawPlayer(
     ctx.translate(x, y);
   }
 
+  // Power-up neon outline around James
+  if (hasAxe && p.state !== "dying") {
+    const flashFast = axeTimer < 120;
+    const showOutline = axeTimer > 120 || Math.floor(axeTimer / 8) % 2 === 0;
+    if (showOutline) {
+      ctx.shadowColor = flashFast ? "#ff6600" : "#ffa500";
+      ctx.shadowBlur = flashFast ? 20 : 12;
+      ctx.strokeStyle = flashFast ? "#ff4400" : "#ff8800";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-3, -3, p.w + 6, p.h + 6);
+      ctx.shadowBlur = 0;
+    }
+  } else if (hasGun && p.state !== "dying") {
+    const flashFast = gunTimer < 120;
+    const showOutline = gunTimer > 120 || Math.floor(gunTimer / 8) % 2 === 0;
+    if (showOutline) {
+      ctx.shadowColor = flashFast ? "#0088ff" : "#00aaff";
+      ctx.shadowBlur = flashFast ? 20 : 12;
+      ctx.strokeStyle = flashFast ? "#0066ff" : "#0099ff";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-3, -3, p.w + 6, p.h + 6);
+      ctx.shadowBlur = 0;
+    }
+  }
+
   // Dying animation
   if (state === "dying" && dyingTimer > 0) {
     const progress = (80 - dyingTimer) / 80;
@@ -1239,6 +1374,8 @@ function drawPlayer(
     // We're already translated to (x,y) or flipped - apply spin around center
     ctx.translate(p.w / 2, p.h / 2 + fallOffset);
     ctx.rotate(spin);
+    const shrink = 1 - progress * 0.4;
+    ctx.scale(shrink, shrink);
     ctx.translate(-p.w / 2, -p.h / 2);
   }
 
@@ -1257,11 +1394,11 @@ function drawPlayer(
   if (state === "run") {
     // ===== SIDE PROFILE (facing right) =====
     // legSwing cycles -10 to +10: positive = front leg forward (more pronounced)
-    const legSwing = Math.sin((frame * Math.PI) / 2) * 10;
+    const legSwing = Math.sin((frame * Math.PI) / 2) * 13;
     // Body bob: slight up-down as legs alternate
     const bodyBob = Math.abs(Math.sin((frame * Math.PI) / 2)) * -1.5;
     // Arms swing counter to front leg
-    const armSwing = -legSwing * 0.9;
+    const armSwing = -legSwing * 1.1;
 
     // --- BACK LEG (behind body, darker) ---
     ctx.fillStyle = "#14143a";
@@ -1269,10 +1406,23 @@ function drawPlayer(
     // back boot
     ctx.fillStyle = "#1a100a";
     ctx.fillRect(6, 31 + legSwing + bodyBob, 10, 5);
+    // back boot sole
+    ctx.fillStyle = "#0a0a0a";
+    ctx.fillRect(6, 35 + legSwing + bodyBob, 10, 1);
 
     // --- BACK ARM (behind body, in shadow - counter swing) ---
     ctx.fillStyle = skinShade;
     ctx.fillRect(4, 13 + armSwing + bodyBob, 5, 9);
+
+    // --- MOTION TRAIL (faint torso ghost behind) ---
+    {
+      const trailDir = facing === -1 ? 2 : -2;
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = shirtBase;
+      ctx.fillRect(5 + trailDir, 12 + bodyBob, 14, 10);
+      ctx.globalAlpha =
+        hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0 ? 0.3 : 1;
+    }
 
     // --- TORSO (side profile, with body bob) ---
     ctx.fillStyle = shirtBase;
@@ -1295,6 +1445,9 @@ function drawPlayer(
     ctx.fillRect(15, 33 - legSwing + bodyBob, 4, 2);
     ctx.fillStyle = "#3d2b1a";
     ctx.fillRect(9, 31 - legSwing + bodyBob, 7, 2);
+    // boot sole (dark rect at toe)
+    ctx.fillStyle = "#0a0a0a";
+    ctx.fillRect(8, 35 - legSwing + bodyBob, 11, 1);
 
     // --- FRONT ARM (counter-swings to legs for natural gait) ---
     ctx.fillStyle = skinTone;
@@ -1324,6 +1477,44 @@ function drawPlayer(
     ctx.fillRect(18, 3, 7, 2);
     ctx.fillStyle = "#2a2a5a";
     ctx.fillRect(10, -2, 4, 2);
+
+    // --- SWEAT DROP when salty ---
+    if (angry) {
+      ctx.fillStyle = "#00ccff";
+      ctx.globalAlpha = 0.8;
+      ctx.fillRect(
+        22,
+        2 + (Math.sin(Date.now() * 0.004) * 0.5 + 0.5) * 2,
+        2,
+        3,
+      );
+      ctx.fillRect(
+        22,
+        4 + (Math.sin(Date.now() * 0.004) * 0.5 + 0.5) * 2,
+        3,
+        2,
+      );
+      ctx.globalAlpha =
+        hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0 ? 0.3 : 1;
+    }
+
+    // Sweat drops when running (visible from saltMeter > 40)
+    if (saltMeter > 40) {
+      const sweatAlpha = Math.min(1, (saltMeter - 40) / 60);
+      ctx.globalAlpha = sweatAlpha * (0.5 + Math.sin(Date.now() * 0.008) * 0.3);
+      ctx.fillStyle = "#66ddff";
+      // Drop 1
+      ctx.beginPath();
+      ctx.ellipse(22, 3, 2, 3, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Drop 2 (slightly behind)
+      ctx.globalAlpha = sweatAlpha * 0.6;
+      ctx.beginPath();
+      ctx.ellipse(21, 8, 1.5, 2.5, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha =
+        hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0 ? 0.3 : 1;
+    }
 
     // --- EYE (single, on front face side) ---
     ctx.fillStyle = "#ffffff";
@@ -1356,7 +1547,21 @@ function drawPlayer(
     }
   } else {
     // ===== FRONT-FACING (idle, jump, hit, victory) =====
-    const jumpLeg = state === "jump" ? -2 : 0;
+    // Breathing bob for idle state
+    const idleBob = state === "idle" ? Math.sin(Date.now() * 0.002) * 1 : 0;
+    const jumpLeg = state === "jump" ? -6 : 0;
+
+    // Wind lines when airborne
+    if (state === "jump") {
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = "#334466";
+      // 3 short horizontal lines to the left (simulate speed)
+      ctx.fillRect(-14, 8, 8, 1);
+      ctx.fillRect(-12, 12, 10, 1);
+      ctx.fillRect(-10, 16, 7, 1);
+      ctx.restore();
+    }
 
     // --- BOOTS ---
     ctx.fillStyle = "#2a1a0e";
@@ -1411,7 +1616,7 @@ function drawPlayer(
 
     // --- HEAD ---
     ctx.fillStyle = skinTone;
-    ctx.fillRect(3, 2, 18, 12);
+    ctx.fillRect(3, 2 + idleBob, 18, 12);
     ctx.fillRect(2, 5, 2, 5);
     ctx.fillRect(20, 5, 2, 5);
     ctx.fillStyle = skinShade;
@@ -1420,7 +1625,7 @@ function drawPlayer(
 
     // --- BASEBALL CAP ---
     ctx.fillStyle = "#1a1a3e";
-    ctx.fillRect(2, -2, 20, 6);
+    ctx.fillRect(2, -2 + idleBob, 20, 6);
     ctx.fillStyle = "#111130";
     ctx.fillRect(2, 3, 20, 2);
     ctx.fillStyle = "#252550";
@@ -1444,6 +1649,26 @@ function drawPlayer(
     } else {
       ctx.fillRect(7, 7, 2, 2);
       ctx.fillRect(15, 7, 2, 2);
+    }
+
+    // --- X EYES during death ---
+    if (state === "dying" && dyingTimer > 0) {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(6, 6, 4, 3);
+      ctx.fillRect(14, 6, 4, 3);
+      ctx.fillStyle = "#ff2200";
+      // Left X
+      ctx.fillRect(6, 6, 1, 1);
+      ctx.fillRect(9, 6, 1, 1);
+      ctx.fillRect(7, 7, 2, 1);
+      ctx.fillRect(6, 8, 1, 1);
+      ctx.fillRect(9, 8, 1, 1);
+      // Right X
+      ctx.fillRect(14, 6, 1, 1);
+      ctx.fillRect(17, 6, 1, 1);
+      ctx.fillRect(15, 7, 2, 1);
+      ctx.fillRect(14, 8, 1, 1);
+      ctx.fillRect(17, 8, 1, 1);
     }
 
     // --- MOUTH / EXPRESSION ---
@@ -1545,9 +1770,54 @@ function drawBear(
   armRaise: number,
   throwAnim = 0,
   walkFrame = 0,
+  tauntTimer = 0,
 ) {
   ctx.save();
   ctx.translate(bx, by);
+
+  // Taunt animation when James dies
+  if (tauntTimer > 0) {
+    const tp = 1 - tauntTimer / 60;
+    const jumpOffset = -Math.abs(Math.sin(tp * Math.PI)) * 20;
+    const waveL = Math.sin(tp * Math.PI * 4) * 25;
+    const waveR = Math.sin(tp * Math.PI * 4 + Math.PI) * 25;
+    ctx.translate(0, jumpOffset);
+    // Body
+    ctx.fillStyle = "#6B0000";
+    ctx.fillRect(6, 16, 30, 28);
+    ctx.fillStyle = "#A52A2A";
+    ctx.fillRect(10, 19, 22, 22);
+    // Arms waving
+    ctx.fillStyle = "#6B0000";
+    ctx.fillRect(-6, 2 + waveL, 12, 18);
+    ctx.fillRect(36, 2 + waveR, 12, 18);
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(-7, waveL, 8, 8);
+    ctx.fillRect(41, waveR, 8, 8);
+    // Head
+    ctx.fillStyle = "#8B0000";
+    ctx.fillRect(8, 0, 26, 22);
+    ctx.fillStyle = "#A52A2A";
+    ctx.fillRect(10, 2, 22, 18);
+    // Laughing mouth
+    ctx.fillStyle = "#330000";
+    ctx.fillRect(13, 16, 16, 5);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(13, 16, 4, 4);
+    ctx.fillRect(19, 16, 4, 4);
+    ctx.fillRect(25, 16, 3, 4);
+    // Gleeful eyes
+    ctx.fillStyle = "#ff6600";
+    ctx.fillRect(11, 6, 7, 5);
+    ctx.fillRect(24, 6, 7, 5);
+    ctx.fillStyle = "#ffd700";
+    ctx.font = "bold 10px monospace";
+    ctx.fillText("HA", 6, -8);
+    ctx.font = "bold 10px monospace";
+    ctx.fillText("HA!", 26, -12);
+    ctx.restore();
+    return; // Don't draw normal bear during taunt
+  }
 
   // Drop shadow
   ctx.fillStyle = "rgba(0,0,0,0.4)";
@@ -1562,6 +1832,15 @@ function drawBear(
   // Belly shading
   ctx.fillStyle = "#8b1a1a";
   ctx.fillRect(10, 36, 22, 5);
+  // Claw marks on belly
+  ctx.strokeStyle = "#500000";
+  ctx.lineWidth = 1;
+  for (let ci = 0; ci < 3; ci++) {
+    ctx.beginPath();
+    ctx.moveTo(14 + ci * 5, 22);
+    ctx.lineTo(17 + ci * 5, 32);
+    ctx.stroke();
+  }
 
   // Fur texture on body edges
   ctx.fillStyle = "#500000";
@@ -1575,11 +1854,15 @@ function drawBear(
   const breathBob =
     throwAnim === 0 && walkFrame < 2 ? Math.sin(Date.now() * 0.003) * 1.5 : 0;
 
+  // 3-frame walk sway based on walkFrame % 45
+  const walkPhase = walkFrame % 45;
+  const bodySwayX = walkPhase < 15 ? -1 : walkPhase < 30 ? 0 : 1;
+
   // Legs (animated when walking with bigger stride)
   if (walkFrame > 0 && throwAnim === 0) {
     const legSwing = Math.sin(walkFrame * 0.25) * 10;
-    // Body lean in walk direction
-    const leanX = walkFrame > 0 ? 2 : 0;
+    // Body lean in walk direction using 3-frame sway
+    const leanX = bodySwayX;
     ctx.save();
     ctx.translate(leanX, breathBob);
     ctx.fillStyle = "#6B0000";
@@ -1603,14 +1886,25 @@ function drawBear(
 
   // Arms with animation
   if (throwAnim > 0) {
+    // Rage glow around bear when throwing
+    ctx.save();
+    ctx.shadowColor = "#ff2200";
+    ctx.shadowBlur = 20 + Math.sin(Date.now() * 0.02) * 8;
+    ctx.globalAlpha = 0.3 + Math.sin(Date.now() * 0.02) * 0.1;
+    ctx.fillStyle = "#ff2200";
+    ctx.fillRect(0, 0, 42, 52);
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.restore();
     // Throw pose: wind-up (throwAnim > 17) then thrust (throwAnim <= 17)
     const throwProgress = throwAnim / 35;
     const isWindup = throwAnim > 17;
     const armExt = isWindup ? (1 - throwProgress) * -18 : throwProgress * -18;
     const thrustFwd = isWindup ? 0 : (1 - throwProgress) * 8;
-    // Body lean forward on throw
+    // Body lean: wind-up leans back, release lurches forward
     ctx.save();
-    ctx.translate(thrustFwd * 0.3, breathBob);
+    const throwLeanX = isWindup ? -3 : 5;
+    ctx.translate(thrustFwd * 0.3 + throwLeanX * (throwAnim / 35), breathBob);
     ctx.fillStyle = "#6B0000";
     ctx.fillRect(-4 - thrustFwd, 16 + armExt, 12, 14);
     ctx.fillStyle = "#8B0000";
@@ -1643,6 +1937,18 @@ function drawBear(
       }
       ctx.restore();
     }
+    // Visible fist circle on throwing arm
+    ctx.save();
+    ctx.shadowColor = "#cc0000";
+    ctx.shadowBlur = 8;
+    const fistX = isWindup ? -6 - thrustFwd : 46 + thrustFwd;
+    const fistY = isWindup ? 14 + armExt : 18 + armExt;
+    ctx.fillStyle = "#8B0000";
+    ctx.beginPath();
+    ctx.arc(fistX, fistY, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
     // Motion lines
     ctx.strokeStyle = "rgba(255,200,0,0.6)";
     ctx.lineWidth = 1.5;
@@ -1655,6 +1961,9 @@ function drawBear(
   } else {
     const raiseL = Math.sin(armRaise) * 8;
     const raiseR = Math.sin(armRaise + Math.PI) * 6;
+    // Apply bodySway to idle arms too
+    ctx.save();
+    ctx.translate(bodySwayX, breathBob);
     ctx.fillStyle = "#6B0000";
     // Left arm
     ctx.fillRect(-2, 16 + raiseL, 10, 16);
@@ -1665,6 +1974,7 @@ function drawBear(
     ctx.fillRect(34, 16 + raiseR, 10, 16);
     ctx.fillStyle = "#8B0000";
     ctx.fillRect(35, 24 + raiseR, 6, 8); // fist
+    ctx.restore();
   }
 
   // Foam/spittle when arm raised
@@ -1688,6 +1998,17 @@ function drawBear(
   ctx.fillStyle = "#cc3333";
   ctx.fillRect(7, -4, 6, 7);
   ctx.fillRect(29, -4, 6, 7);
+  // Dollar sign ear tag on right ear
+  ctx.save();
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 4;
+  ctx.fillStyle = "#ffd700";
+  ctx.font = "bold 5px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("$", 32, -1);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
 
   // Glowing red eyes
   ctx.shadowColor = "#ff0000";
@@ -1706,17 +2027,30 @@ function drawBear(
   // Snout
   ctx.fillStyle = "#cc5555";
   ctx.fillRect(14, 14, 14, 8);
+  // Snout shiny highlight
+  ctx.fillStyle = "#ffffff";
+  ctx.globalAlpha = 0.6;
+  ctx.fillRect(15, 14, 3, 2);
+  ctx.globalAlpha = 1;
   ctx.fillStyle = "#000";
   ctx.fillRect(16, 14, 3, 2); // nostrils
   ctx.fillRect(23, 14, 3, 2);
 
-  // Mouth - angry snarl
-  ctx.fillStyle = "#330000";
-  ctx.fillRect(15, 18, 12, 4);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(15, 18, 3, 3); // teeth
-  ctx.fillRect(20, 18, 3, 3);
-  ctx.fillRect(25, 18, 2, 3);
+  // Mouth - smug when walking, snarl during throw
+  if (throwAnim > 0) {
+    ctx.fillStyle = "#330000";
+    ctx.fillRect(15, 18, 12, 4);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(15, 18, 3, 3); // teeth
+    ctx.fillRect(20, 18, 3, 3);
+    ctx.fillRect(25, 18, 2, 3);
+  } else {
+    // Smug/neutral mouth - slight upward curve at corners
+    ctx.fillStyle = "#330000";
+    ctx.fillRect(16, 20, 10, 2); // main horizontal line
+    ctx.fillRect(14, 19, 2, 2); // left corner turned up
+    ctx.fillRect(26, 19, 2, 2); // right corner turned up
+  }
 
   // $ on belly in gold
   ctx.shadowColor = "#ffd700";
@@ -1754,6 +2088,9 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
 
   switch (h.type) {
     case "boulder": {
+      // Drop shadow - deeper
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillRect(-1, h.h + 2, h.w + 2, 5);
       // Faceted dark boulder
       ctx.fillStyle = "#444444";
       ctx.fillRect(2, 0, 16, 20);
@@ -1780,6 +2117,17 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillRect(h.w / 2 - 1, 1, 2, h.h / 2 - 2);
       ctx.fillStyle = "#aaaacc";
       ctx.fillRect(1, h.h / 2 - 1, h.w / 2 - 2, 2);
+      // Crack lines
+      ctx.strokeStyle = "#222222";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(4, 5);
+      ctx.lineTo(12, 13);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(14, 3);
+      ctx.lineTo(8, 15);
+      ctx.stroke();
       break;
     }
     case "redCandle": {
@@ -1812,13 +2160,18 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
         Math.sin(Date.now() * 0.02) * 2 + Math.sin(Date.now() * 0.051) * 1;
       ctx.shadowColor = "#ff4400";
       ctx.shadowBlur = 10 + Math.abs(flameFlicker) * 3;
+      // Pointed flame - 3 stacked rects wide to narrow
       ctx.fillStyle = "#ffdd00";
-      ctx.fillRect(h.w / 2 - 3, -6 + flameFlicker, 6, 8);
-      // Inner flame
+      ctx.fillRect(h.w / 2 - 3, -4 + flameFlicker, 6, 5); // wide base
       ctx.fillStyle = "#ff8800";
-      ctx.fillRect(h.w / 2 - 2, -5 + flameFlicker, 4, 6);
+      ctx.fillRect(h.w / 2 - 2, -7 + flameFlicker, 4, 4); // mid
       ctx.fillStyle = "#ffeeaa";
-      ctx.fillRect(h.w / 2 - 1, -4 + flameFlicker, 2, 4);
+      ctx.fillRect(h.w / 2 - 1, -10 + flameFlicker, 2, 4); // narrow tip
+      // White highlight
+      ctx.fillStyle = "#ffffff";
+      ctx.globalAlpha = 0.7;
+      ctx.fillRect(h.w / 2 - 2, -7 + flameFlicker, 2, 2);
+      ctx.globalAlpha = 1;
       ctx.shadowBlur = 0;
       if (!h.fallsThrough) {
         ctx.shadowColor = "#ff2200";
@@ -1845,12 +2198,18 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
         Math.sin(Date.now() * 0.02) * 2 + Math.sin(Date.now() * 0.047) * 1;
       ctx.shadowColor = "#00ff66";
       ctx.shadowBlur = 12 + Math.abs(greenFlameFlicker) * 3;
+      // Pointed flame - 3 stacked rects wide to narrow
       ctx.fillStyle = "#ffdd00";
-      ctx.fillRect(h.w / 2 - 3, -6 + greenFlameFlicker, 6, 8);
+      ctx.fillRect(h.w / 2 - 3, -4 + greenFlameFlicker, 6, 5); // wide base
       ctx.fillStyle = "#ffaa00";
-      ctx.fillRect(h.w / 2 - 2, -5 + greenFlameFlicker, 4, 6);
+      ctx.fillRect(h.w / 2 - 2, -7 + greenFlameFlicker, 4, 4); // mid
       ctx.fillStyle = "#aaffcc";
-      ctx.fillRect(h.w / 2 - 1, -4 + greenFlameFlicker, 2, 3);
+      ctx.fillRect(h.w / 2 - 1, -10 + greenFlameFlicker, 2, 4); // narrow tip
+      // White highlight
+      ctx.fillStyle = "#ffffff";
+      ctx.globalAlpha = 0.7;
+      ctx.fillRect(h.w / 2 - 2, -7 + greenFlameFlicker, 2, 2);
+      ctx.globalAlpha = 1;
       ctx.shadowBlur = 0;
       if (!h.fallsThrough) {
         ctx.shadowColor = "#00cc44";
@@ -1931,6 +2290,11 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillRect(0, h.h - 14, h.w, 4);
       ctx.fillStyle = "#7a4a28";
       ctx.fillRect(0, 2, h.w, 4);
+      // Wooden plank pattern (3 horizontal dark lines across body)
+      ctx.fillStyle = "#4a2e15";
+      ctx.fillRect(0, 6, h.w, 1);
+      ctx.fillRect(0, 10, h.w, 1);
+      ctx.fillRect(0, 14, h.w, 1);
       // Metal rivets
       ctx.fillStyle = "#444444";
       ctx.fillRect(3, 5, 3, 3);
@@ -1959,13 +2323,16 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillRect(h.w - 5, 0, 2, h.h);
       // Metal bands
       ctx.fillStyle = "#333333";
-      ctx.fillRect(0, 2, h.w, 2);
+      ctx.fillRect(0, Math.round(h.h * 0.25), h.w, 2);
       ctx.fillRect(0, h.h / 2 - 1, h.w, 2);
-      ctx.fillRect(0, h.h - 4, h.w, 2);
+      ctx.fillRect(0, Math.round(h.h * 0.75), h.w, 2);
       // Band sheen
       ctx.fillStyle = "#555555";
-      ctx.fillRect(0, 2, h.w, 1);
+      ctx.fillRect(0, Math.round(h.h * 0.25), h.w, 1);
       ctx.fillRect(0, h.h / 2 - 1, h.w, 1);
+      // Bung hole at center
+      ctx.fillStyle = "#222222";
+      ctx.fillRect(h.w / 2 - 1, h.h / 2 - 1, 3, 3);
       // LIQUIDATED text
       ctx.save();
       ctx.fillStyle = "#ff2200";
@@ -1977,7 +2344,27 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       break;
     }
     case "doompost": {
+      // Extra wobble on doompost
+      ctx.save();
+      ctx.translate(h.w / 2, h.h / 2);
+      ctx.rotate(Math.sin(Date.now() * 0.015) * 0.15);
+      ctx.translate(-h.w / 2, -h.h / 2);
+      ctx.restore();
+      // Glowing outline
+      ctx.save();
+      ctx.shadowColor = "#ff4400";
+      ctx.shadowBlur = 6;
+      // Warning stripes on post
+      for (let si = 0; si < 4; si++) {
+        ctx.fillStyle = si % 2 === 0 ? "#ff2200" : "#ffcc00";
+        ctx.fillRect(h.w / 2 - 2, si * 4, 4, 4);
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
       // Warning diamond shape
+      ctx.save();
+      ctx.shadowColor = "#ff4400";
+      ctx.shadowBlur = 6;
       ctx.fillStyle = "#dd0000";
       ctx.beginPath();
       ctx.moveTo(h.w / 2, 0);
@@ -1986,6 +2373,7 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.lineTo(0, h.h / 2);
       ctx.closePath();
       ctx.fill();
+      ctx.restore();
       // Border
       ctx.strokeStyle = "#000000";
       ctx.lineWidth = 2;
@@ -2037,6 +2425,20 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillRect(h.w / 2 - 1, h.h * 0.37, 2, 3);
       ctx.fillStyle = "rgba(255,215,0,0.3)";
       ctx.fillRect(2, 1, h.w - 4, 4);
+      // Crack visual when flagged
+      if (h.flagged) {
+        const flashOn = Math.floor((h.flagTimer || 0) / 5) % 2 === 0;
+        if (flashOn) {
+          ctx.strokeStyle = "#ffd700";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(4, 4);
+          ctx.lineTo(10, 12);
+          ctx.moveTo(12, 6);
+          ctx.lineTo(8, 14);
+          ctx.stroke();
+        }
+      }
       break;
     }
     case "saltbag": {
@@ -2070,6 +2472,21 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       ctx.fillStyle = "#a09070";
       ctx.fillRect(h.w - 5, 5, 3, h.h - 8);
       ctx.fillRect(3, h.h - 6, h.w - 6, 3);
+      // Salt spray when flagged
+      if (h.flagged) {
+        const t = h.flagTimer || 0;
+        ctx.fillStyle = "rgba(255,255,255,0.8)";
+        for (let si = 0; si < 6; si++) {
+          const angle = (si / 6) * Math.PI * 2 + t * 0.1;
+          const r = 8 + Math.sin(t * 0.2) * 3;
+          ctx.fillRect(
+            h.w / 2 + Math.cos(angle) * r - 1,
+            h.h / 2 + Math.sin(angle) * r - 1,
+            2,
+            2,
+          );
+        }
+      }
       break;
     }
   }
@@ -2083,6 +2500,7 @@ function drawPlatform(
   w: number,
   h: number,
   tint?: string,
+  level = 0,
 ) {
   const bodyColor = tint || "#2a1f0e";
   // Drop shadow (wider, softer)
@@ -2156,6 +2574,53 @@ function drawPlatform(
     ctx.fillRect(cx + 8, y - 3, 2, 2);
     ctx.fillStyle = "#c8e8f0";
   }
+
+  // === LEVEL-BASED PLATFORM TEXTURE ===
+  if (level >= 0 && level <= 2) {
+    // WOOD PLANKS: vertical dark lines + light top edge highlight
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    const plankCount = Math.max(2, Math.floor(w / 16));
+    const plankSpacing = w / plankCount;
+    for (let pi = 1; pi < plankCount; pi++) {
+      ctx.fillRect(x + pi * plankSpacing, y + 1, 1, h - 1);
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    ctx.fillRect(x, y, w, 1);
+  } else if (level >= 3 && level <= 4) {
+    // STONE BRICK: mortar lines
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.fillRect(x, y + Math.floor(h / 2), w, 1); // horizontal mortar
+    const brickW = Math.max(20, Math.floor(w / 4));
+    for (let bi = 0; bi <= Math.floor(w / brickW); bi++) {
+      const boff = bi % 2 === 0 ? 0 : Math.floor(brickW / 2);
+      ctx.fillRect(x + bi * brickW + boff, y, 1, Math.floor(h / 2));
+      ctx.fillRect(
+        x + bi * brickW,
+        y + Math.floor(h / 2),
+        1,
+        h - Math.floor(h / 2),
+      );
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(x, y, w, 1);
+  } else if (level >= 5) {
+    // CRYSTAL/GLOWING: cyan glow + white speckles
+    ctx.save();
+    ctx.shadowColor = "#00ffff";
+    ctx.shadowBlur = 6;
+    ctx.strokeStyle = "rgba(0,220,255,0.3)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
+    // White speckle rects along top edge
+    ctx.fillStyle = "rgba(200,255,255,0.8)";
+    for (let si = x + 6; si < x + w - 4; si += 10) {
+      ctx.fillRect(si, y, 2, 2);
+    }
+    // Blue tint overlay
+    ctx.fillStyle = "rgba(0,100,200,0.08)";
+    ctx.fillRect(x, y, w, h);
+  }
 }
 function drawExit(
   ctx: CanvasRenderingContext2D,
@@ -2167,9 +2632,28 @@ function drawExit(
   const glow = 0.7 + Math.sin(frame * 0.06) * 0.28;
   ctx.save();
 
-  // Outer glow halo
+  // Outer glow halo - stronger, pulsing
   ctx.shadowColor = "#00C853";
-  ctx.shadowBlur = 28 * glow;
+  ctx.shadowBlur = (20 + Math.sin(frame * 0.06) * 8) * glow;
+
+  // Light rays fanning out from flame tip
+  ctx.save();
+  ctx.globalAlpha = 0.3;
+  ctx.strokeStyle = "#00ff88";
+  ctx.lineWidth = 1;
+  const rayOriginX = x + 9;
+  const rayOriginY = y - 74;
+  for (let ri = 0; ri < 5; ri++) {
+    const rayAngle = -Math.PI / 2 + (ri - 2) * 0.3;
+    ctx.beginPath();
+    ctx.moveTo(rayOriginX, rayOriginY);
+    ctx.lineTo(
+      rayOriginX + Math.cos(rayAngle) * 28,
+      rayOriginY + Math.sin(rayAngle) * 28,
+    );
+    ctx.stroke();
+  }
+  ctx.restore();
 
   // Upper wick
   ctx.strokeStyle = "#888888";
@@ -2179,35 +2663,41 @@ function drawExit(
   ctx.lineTo(x + 9, y - 64);
   ctx.stroke();
 
-  // Flame at top of wick
+  // Flame at top of wick - taller (8px taller)
   ctx.shadowColor = "#ffcc00";
   ctx.shadowBlur = 14;
-  const flameY = y - 66 + Math.sin(frame * 0.15) * 2;
+  const flameY = y - 74 + Math.sin(frame * 0.15) * 2;
+  // Pointed flame stacked rects
   ctx.fillStyle = "#ffdd00";
-  ctx.fillRect(x + 6, flameY, 7, 8);
+  ctx.fillRect(x + 5, flameY + 10, 9, 6); // wide base
   ctx.fillStyle = "#ff8800";
-  ctx.fillRect(x + 7, flameY + 1, 5, 6);
+  ctx.fillRect(x + 6, flameY + 5, 7, 6); // mid
   ctx.fillStyle = "#ffffaa";
-  ctx.fillRect(x + 8, flameY + 2, 3, 3);
+  ctx.fillRect(x + 7, flameY, 5, 6); // narrow tip
+  ctx.fillStyle = "#ffffff";
+  ctx.globalAlpha = 0.6;
+  ctx.fillRect(x + 7, flameY + 2, 2, 3); // white highlight
+  ctx.globalAlpha = 1;
 
-  // Floating flame particles above portal
-  for (let fp = 0; fp < 4; fp++) {
-    const fpOffset = (fp * 7 + frame * 0.7 * (fp + 1)) % 28;
-    const fpX = x + 3 + Math.sin(frame * 0.1 + fp * 1.5) * 7;
+  // Floating ember particles above portal - 5 embers
+  for (let fp = 0; fp < 5; fp++) {
+    const fpMaxH = 40;
+    const fpOffset = (fp * 8 + frame * 0.7 * (fp + 1)) % fpMaxH;
+    const fpX = x + 2 + Math.sin(frame * 0.1 + fp * 1.5) * 8;
     const fpY = flameY - fpOffset;
-    const fpAlpha = Math.max(0, 1 - fpOffset / 28);
+    const fpAlpha = Math.max(0, 1 - fpOffset / fpMaxH);
     ctx.save();
-    ctx.globalAlpha = fpAlpha * 0.8;
+    ctx.globalAlpha = fpAlpha * 0.9;
     ctx.shadowColor = "#00ff88";
     ctx.shadowBlur = 6;
     ctx.fillStyle = fp % 2 === 0 ? "#00ff88" : "#ffdd00";
-    ctx.fillRect(fpX, fpY, 3, 3);
+    ctx.fillRect(fpX, fpY, 2, 2);
     ctx.restore();
   }
 
   // Candle body (tall green rectangle - bullish!)
   ctx.shadowColor = "#00C853";
-  ctx.shadowBlur = 24 + Math.sin(frame * 0.05) * 12;
+  ctx.shadowBlur = 20 + Math.sin(frame * 0.06) * 8;
   ctx.fillStyle = "#00C853";
   ctx.fillRect(x, y - 50, 18, 50);
 
@@ -2271,8 +2761,12 @@ function drawWaterBottle(
   ctx.shadowBlur = 0;
   ctx.fillRect(x + 3, y + 9, 10, 6);
 
+  // Blue label stripe
+  ctx.fillStyle = "#1565c0";
+  ctx.fillRect(x + 3, y + 10, 10, 4);
+
   // H2O label text
-  ctx.fillStyle = "#0277bd";
+  ctx.fillStyle = "#e3f2fd";
   ctx.font = "bold 4px monospace";
   ctx.textAlign = "center";
   ctx.fillText("H2O", x + 8, y + 14);
@@ -2281,6 +2775,10 @@ function drawWaterBottle(
   // Bottle highlight
   ctx.fillStyle = "rgba(255,255,255,0.5)";
   ctx.fillRect(x + 4, y + 6, 2, 10);
+
+  // Shine highlight (upper-left of bottle)
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.fillRect(x + 4, y + 6, 2, 5);
 
   // Cap
   ctx.shadowColor = "#81d4fa";
@@ -2304,16 +2802,26 @@ function drawMaturityBag(
 ) {
   if (lifetime < 120 && Math.floor(lifetime / 10) % 2 === 0) return;
   const bob = Math.sin(Date.now() * 0.006) * 2;
+  const mbFrame = Math.floor(Date.now() / 50) % 20;
   ctx.save();
   ctx.translate(x, y + bob);
   ctx.shadowColor = "#ffd700";
-  ctx.shadowBlur = 10;
+  ctx.shadowBlur = 4 + mbFrame * 0.2;
   ctx.fillStyle = "#8B6914";
   ctx.fillRect(1, 8, 14, 12);
   ctx.fillRect(3, 6, 10, 4);
   ctx.fillRect(5, 4, 6, 4);
   ctx.fillStyle = "#c9a227";
   ctx.fillRect(2, 9, 5, 4);
+  // Shimmer diagonal stripe
+  if (mbFrame < 6) {
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(3, 8, 1, 12);
+    ctx.fillRect(5, 8, 1, 10);
+    ctx.restore();
+  }
   ctx.font = "bold 8px monospace";
   ctx.fillStyle = "#ffd700";
   ctx.textAlign = "center";
@@ -2331,20 +2839,38 @@ function drawCommunityBag(
 ) {
   if (lifetime < 120 && Math.floor(lifetime / 10) % 2 === 0) return;
   const bob = Math.sin(Date.now() * 0.005) * 3;
+  const cbFrame = Math.floor(Date.now() / 50) % 20;
   ctx.save();
   ctx.translate(x, y + bob);
   ctx.shadowColor = "#00ff88";
-  ctx.shadowBlur = 16;
+  ctx.shadowBlur = 14 + cbFrame * 0.3;
   ctx.fillStyle = "#2e7d32";
   ctx.fillRect(0, 6, 22, 20);
   ctx.fillRect(3, 3, 16, 6);
   ctx.fillRect(7, 0, 8, 5);
   ctx.fillStyle = "#43a047";
   ctx.fillRect(2, 8, 8, 6);
+  // Intense shimmer diagonal stripe
+  if (cbFrame < 8) {
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(4, 6, 2, 20);
+    ctx.fillRect(8, 6, 2, 18);
+    ctx.restore();
+  }
   ctx.font = "bold 9px monospace";
   ctx.fillStyle = "#00ff88";
   ctx.textAlign = "center";
   ctx.fillText("$$", 11, 20);
+  // Glowing $$$ label above bag
+  ctx.save();
+  ctx.shadowColor = "#00ff88";
+  ctx.shadowBlur = 8;
+  ctx.font = "bold 7px monospace";
+  ctx.fillStyle = "#00ff88";
+  ctx.fillText("$$$", 11, -2);
+  ctx.restore();
   ctx.textAlign = "left";
   ctx.shadowBlur = 0;
   ctx.restore();
@@ -2443,6 +2969,28 @@ function drawBackground(
   ctx.fillStyle = palette.bg1;
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
+  // === FAR-BACK SCAFFOLDING SILHOUETTE (parallax 0.1) ===
+  {
+    const scaffoldOffX = (frame * 0.1) % 100;
+    ctx.save();
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = "#3a2010";
+    // Draw a few H-shaped scaffolding structures
+    const scaffoldPositions = [30, 160, 290, 400];
+    for (const sx of scaffoldPositions) {
+      const ox = ((sx + scaffoldOffX) % (CANVAS_W + 40)) - 20;
+      // Left post
+      ctx.fillRect(ox, 60, 5, CANVAS_H - 60);
+      // Right post
+      ctx.fillRect(ox + 30, 60, 5, CANVAS_H - 60);
+      // Cross beams
+      ctx.fillRect(ox - 3, 120, 41, 5);
+      ctx.fillRect(ox - 3, 240, 41, 5);
+      ctx.fillRect(ox - 3, 360, 41, 5);
+    }
+    ctx.restore();
+  }
+
   // Stone block grid
   ctx.fillStyle = palette.bg2;
   for (let gy = 0; gy < CANVAS_H; gy += 32) {
@@ -2511,6 +3059,19 @@ function drawBackground(
     }
   }
 
+  // === ANIMATED STALACTITE DRIPS (deterministic via frameCount) ===
+  stalactiteData.forEach((st, idx) => {
+    const dripPhase = (frame + idx * 37) % 180;
+    if (dripPhase < 20) {
+      const dripY = st.h + dripPhase * 0.8;
+      ctx.save();
+      ctx.globalAlpha = 0.7 * (1 - dripPhase / 20);
+      ctx.fillStyle = "#5090c0";
+      ctx.fillRect(st.x + st.w / 2 - 1, dripY, 2, 3);
+      ctx.restore();
+    }
+  });
+
   // === ORE VEINS: glowing diagonal streaks ===
   const oreVeins = [
     { x: 20, y: 150, len: 60, color: "#00ff88", angle: 0.7 },
@@ -2524,7 +3085,7 @@ function drawBackground(
     const glowPulse = 0.4 + Math.sin(frame * 0.035 + vein.x * 0.1) * 0.25;
     ctx.save();
     ctx.shadowColor = vein.color;
-    ctx.shadowBlur = 8 * glowPulse;
+    ctx.shadowBlur = (4 + Math.sin(frame * 0.05) * 3) * glowPulse;
     ctx.strokeStyle = vein.color;
     ctx.globalAlpha = glowPulse;
     ctx.lineWidth = 2;
@@ -2744,6 +3305,50 @@ function drawBackground(
   for (let sy = 0; sy < CANVAS_H; sy += 2) {
     ctx.fillRect(0, sy, CANVAS_W, 1);
   }
+
+  // Per-year lava/hellscape atmosphere
+  const levelIdx = level;
+  if (levelIdx >= 4 && levelIdx <= 5) {
+    // Lava glow on cave walls
+    const lavaAlpha = 0.15 + Math.sin(frame * 0.03) * 0.05;
+    ctx.fillStyle = `rgba(255,80,0,${lavaAlpha})`;
+    ctx.fillRect(0, 0, 30, CANVAS_H);
+    ctx.fillRect(450, 0, 30, CANVAS_H);
+    // Lava veins
+    ctx.strokeStyle = `rgba(255,120,0,${lavaAlpha * 2})`;
+    ctx.lineWidth = 2;
+    for (let lv = 0; lv < 3; lv++) {
+      ctx.beginPath();
+      ctx.moveTo(0, 100 + lv * 150);
+      ctx.bezierCurveTo(
+        20,
+        120 + lv * 150,
+        10,
+        140 + lv * 150,
+        25,
+        160 + lv * 150,
+      );
+      ctx.stroke();
+    }
+  }
+  if (levelIdx >= 6) {
+    // Deep red ambient
+    ctx.fillStyle = "rgba(60,0,0,0.2)";
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    // Red crystal formations on floor
+    ctx.fillStyle = "#4a0000";
+    for (let rc = 0; rc < 5; rc++) {
+      const rx = rc * 90 + 20;
+      ctx.beginPath();
+      ctx.moveTo(rx, CANVAS_H);
+      ctx.lineTo(rx + 8, CANVAS_H - 40);
+      ctx.lineTo(rx + 16, CANVAS_H);
+      ctx.fill();
+      ctx.fillStyle = "#660000";
+      ctx.fillRect(rx + 2, CANVAS_H - 35, 4, 30);
+      ctx.fillStyle = "#4a0000";
+    }
+  }
 }
 
 function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
@@ -2816,8 +3421,12 @@ function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
   ctx.fillStyle = "#81c784";
   ctx.fillText("PORTFOLIO VALUE", 116, 17);
   ctx.font = "bold 12px monospace";
-  // Color the portfolio value: red when low, yellow mid, green when thriving
-  if (portfolioDisplay < 10000) {
+  // Portfolio ticker flash effect
+  if (gs.portfolioTickerFlash > 0) {
+    ctx.fillStyle = gs.portfolioTickerDir === 1 ? "#00ff88" : "#ff4444";
+    ctx.shadowColor = gs.portfolioTickerDir === 1 ? "#00ff44" : "#ff0000";
+    ctx.shadowBlur = 10;
+  } else if (portfolioDisplay < 10000) {
     ctx.fillStyle = "#ff4444";
     ctx.shadowColor = "#ff0000";
     ctx.shadowBlur = 6;
@@ -2854,15 +3463,16 @@ function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.fillRect(barX, barY + barH - fillH, barW, fillH);
   }
 
-  // Border - glow red when critical
-  if (saltPct > 0.9) {
+  // Border - glow red when critical with pulse
+  if (saltPct > 0.8) {
     ctx.shadowColor = "#ff0000";
-    ctx.shadowBlur = 8;
-    ctx.strokeStyle = "#ff3333";
+    ctx.shadowBlur = 4 + Math.sin(gs.frameCount * 0.2) * 3;
+    ctx.strokeStyle = "#ff4400";
+    ctx.lineWidth = 2;
   } else {
     ctx.strokeStyle = "#555555";
+    ctx.lineWidth = 1;
   }
-  ctx.lineWidth = 1;
   ctx.strokeRect(barX, barY, barW, barH);
   ctx.shadowBlur = 0;
 
@@ -2911,13 +3521,62 @@ function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.fillStyle = axeGrad;
     if (axeFillH > 0)
       ctx.fillRect(axeBarX, axeBarY + axeBarH - axeFillH, axeBarW, axeFillH);
-    ctx.strokeStyle = "#ffd700";
+    // Pulse red glow when nearly expired
+    if (gs.axeTimer < 120) {
+      ctx.shadowColor = "#ff2200";
+      ctx.shadowBlur = 3 + Math.sin(gs.frameCount * 0.3) * 2;
+      ctx.strokeStyle = "#ff4400";
+    } else {
+      ctx.strokeStyle = "#ffd700";
+    }
     ctx.lineWidth = 1;
     ctx.strokeRect(axeBarX, axeBarY, axeBarW, axeBarH);
+    ctx.shadowBlur = 0;
     ctx.font = "6px monospace";
     ctx.fillStyle = "#ffd700";
     ctx.textAlign = "center";
     ctx.fillText("AXE", axeBarX + axeBarW / 2, axeBarY + axeBarH + 8);
+    ctx.textAlign = "left";
+  }
+
+  // Gun timer bar (when active)
+  const gunBarVisible =
+    gs.gunTimer > 100 || Math.floor(gs.gunTimer / 10) % 2 === 0;
+  if (gs.hasGun && gunBarVisible) {
+    const gunPct = gs.gunTimer / 500;
+    const gunBarX = 424;
+    const gunBarY = 4;
+    const gunBarW = 10;
+    const gunBarH = 42;
+    ctx.fillStyle = "#111111";
+    ctx.fillRect(gunBarX - 1, gunBarY - 1, gunBarW + 2, gunBarH + 2);
+    const gunGrad = ctx.createLinearGradient(
+      gunBarX,
+      gunBarY + gunBarH,
+      gunBarX,
+      gunBarY,
+    );
+    gunGrad.addColorStop(0, "#00ff88");
+    gunGrad.addColorStop(1, "#00ccff");
+    const gunFillH = gunBarH * gunPct;
+    ctx.fillStyle = gunGrad;
+    if (gunFillH > 0)
+      ctx.fillRect(gunBarX, gunBarY + gunBarH - gunFillH, gunBarW, gunFillH);
+    // Pulse red glow when nearly expired
+    if (gs.gunTimer < 100) {
+      ctx.shadowColor = "#ff2200";
+      ctx.shadowBlur = 3 + Math.sin(gs.frameCount * 0.3) * 2;
+      ctx.strokeStyle = "#ff4400";
+    } else {
+      ctx.strokeStyle = "#00ff88";
+    }
+    ctx.lineWidth = 1;
+    ctx.strokeRect(gunBarX, gunBarY, gunBarW, gunBarH);
+    ctx.shadowBlur = 0;
+    ctx.font = "6px monospace";
+    ctx.fillStyle = "#00ff88";
+    ctx.textAlign = "center";
+    ctx.fillText("GUN", gunBarX + gunBarW / 2, gunBarY + gunBarH + 8);
     ctx.textAlign = "left";
   }
 
@@ -3506,6 +4165,27 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
 
   drawBackground(ctx, gs.level, gs.frameCount);
 
+  // Draw ambient atmosphere particles
+  for (const ap of gs.ambientParticles) {
+    ctx.globalAlpha = ap.alpha;
+    if (ap.type === "dust") {
+      ctx.fillStyle = "#ccbbaa";
+      ctx.fillRect(ap.x, ap.y, ap.size || 2, ap.size || 2);
+    } else if (ap.type === "drip") {
+      ctx.fillStyle = "#6699ff";
+      ctx.fillRect(ap.x, ap.y, 2, ap.size || 4);
+    } else if (ap.type === "ember") {
+      ctx.fillStyle = `hsl(${20 + Math.random() * 40}, 100%, 60%)`;
+      ctx.beginPath();
+      ctx.arc(ap.x, ap.y, ap.size || 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (ap.type === "ash") {
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(ap.x, ap.y, ap.size || 2, 1);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   // Platforms (randomly generated each level)
   const levelPalette = LEVEL_PALETTES[gs.level % LEVEL_PALETTES.length];
   for (const plat of gs.currentPlatforms) {
@@ -3516,6 +4196,7 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
       plat.w,
       plat.h,
       levelPalette.platformColor,
+      gs.level,
     );
   }
 
@@ -3525,7 +4206,14 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
 
   // Water Bottles
   for (const wb of gs.waterBottles) {
-    if (!wb.collected) drawWaterBottle(ctx, wb.x, wb.y, gs.frameCount);
+    if (!wb.collected) {
+      ctx.save();
+      ctx.shadowColor = "#66ddff";
+      ctx.shadowBlur = 10 + Math.sin(Date.now() * 0.005) * 4;
+      drawWaterBottle(ctx, wb.x, wb.y, gs.frameCount);
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
   }
 
   // Hazards
@@ -3553,12 +4241,32 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
 
   // Maturity bags
   for (const mb of gs.maturityBags) {
-    if (!mb.collected)
+    if (!mb.collected) {
+      ctx.save();
+      ctx.shadowColor = "#ffd700";
+      ctx.shadowBlur = 6 + Math.sin(Date.now() * 0.008 + mb.id) * 4;
       drawMaturityBag(ctx, mb.x, mb.y, mb.lifetime, mb.maxLifetime, mb.amount);
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
   }
   // Community bags
   for (const cb of gs.communityBags) {
-    if (!cb.collected) drawCommunityBag(ctx, cb.x, cb.y, cb.lifetime);
+    if (!cb.collected) {
+      ctx.save();
+      // Gold pulsing aura
+      const pulseR = 14 + Math.sin(Date.now() * 0.005) * 4;
+      ctx.shadowColor = "#ffd700";
+      ctx.shadowBlur = 20;
+      ctx.beginPath();
+      ctx.arc(cb.x + 11, cb.y + 13, pulseR, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,215,0,0.5)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+      drawCommunityBag(ctx, cb.x, cb.y, cb.lifetime);
+    }
   }
 
   // Bullets
@@ -3618,6 +4326,7 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     gs.bearArmRaise,
     gs.bearThrowAnim,
     gs.bearWalkFrame,
+    gs.bearTauntTimer,
   );
 
   // Steam particles
@@ -3675,6 +4384,8 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     gs.hasAxe,
     gs.axeTimer,
     gs.dyingTimer,
+    gs.hasGun,
+    gs.gunTimer,
   );
 
   // Level transition - dramatic wipe with scanline bars
@@ -3700,6 +4411,32 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
       }
     }
     ctx.restore();
+  }
+
+  // Vignette when salt meter critical
+  if (gs.saltMeter >= 80) {
+    const vigAlpha = ((gs.saltMeter - 80) / 20) * 0.5;
+    const grad = ctx.createRadialGradient(240, 320, 100, 240, 320, 340);
+    grad.addColorStop(0, "rgba(0,0,0,0)");
+    grad.addColorStop(1, `rgba(60,0,0,${vigAlpha})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 480, 640);
+  }
+
+  // Red damage flash
+  if (gs.damageFlashTimer > 0) {
+    ctx.globalAlpha = (gs.damageFlashTimer / 10) * 0.4;
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 480, 640);
+    ctx.globalAlpha = 1;
+  }
+
+  // Green portfolio boost flash
+  if (gs.portfolioFlashGreenTimer > 0) {
+    ctx.globalAlpha = (gs.portfolioFlashGreenTimer / 12) * 0.25;
+    ctx.fillStyle = "#00ff88";
+    ctx.fillRect(0, 0, 480, 640);
+    ctx.globalAlpha = 1;
   }
 
   // End screen shake transform - ALWAYS restore to match unconditional save above
@@ -3803,6 +4540,12 @@ export default function Game() {
     sparkParticles: [],
     coinParticles: [],
     screenShake: 0,
+    portfolioTickerFlash: 0,
+    portfolioTickerDir: 1 as 1 | -1,
+    bearTauntTimer: 0,
+    damageFlashTimer: 0,
+    portfolioFlashGreenTimer: 0,
+    ambientParticles: [],
   });
   const rafRef = useRef<number>(0);
   const prevScreenRef = useRef<GameScreen>("TITLE");
@@ -3961,6 +4704,10 @@ export default function Game() {
     gs.bearX = 200;
     gs.bearDir = 1;
     gs.bearWalkFrame = 0;
+    gs.bearTauntTimer = 0;
+    gs.damageFlashTimer = 0;
+    gs.portfolioFlashGreenTimer = 0;
+    gs.ambientParticles = [];
   }, []);
 
   const handleSpace = useCallback(() => {
