@@ -408,8 +408,8 @@ function updateGame(gs: GameState, _dt: number) {
   const level = LEVELS[gs.level];
   const p = gs.player;
 
-  // Salt meter decay
-  gs.saltMeter = Math.max(0, gs.saltMeter - 0.3);
+  // Salt meter passive fill (acts as a pressure timer - faster in later levels)
+  gs.saltMeter = Math.min(100, gs.saltMeter + (0.08 + (gs.level - 1) * 0.015));
 
   // Speed modifier
   const walkSpeed =
@@ -486,11 +486,14 @@ function updateGame(gs: GameState, _dt: number) {
   if (gs.gunCooldown > 0) gs.gunCooldown--;
 
   // Horizontal
+  // Salt-based speed penalty (high salt = slower, but jump unaffected)
+  const saltSpeedMult =
+    gs.saltMeter > 85 ? 0.25 : gs.saltMeter > 70 ? 0.55 : 1.0;
   if (left) {
-    p.vx = -walkSpeed;
+    p.vx = -walkSpeed * saltSpeedMult;
     p.facing = -1;
   } else if (right) {
-    p.vx = walkSpeed;
+    p.vx = walkSpeed * saltSpeedMult;
     p.facing = 1;
   } else p.vx = 0;
 
@@ -1340,30 +1343,8 @@ function drawPlayer(
     ctx.translate(x, y);
   }
 
-  // Power-up neon outline around James
-  if (hasAxe && p.state !== "dying") {
-    const flashFast = axeTimer < 120;
-    const showOutline = axeTimer > 120 || Math.floor(axeTimer / 8) % 2 === 0;
-    if (showOutline) {
-      ctx.shadowColor = flashFast ? "#ff6600" : "#ffa500";
-      ctx.shadowBlur = flashFast ? 20 : 12;
-      ctx.strokeStyle = flashFast ? "#ff4400" : "#ff8800";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-3, -3, p.w + 6, p.h + 6);
-      ctx.shadowBlur = 0;
-    }
-  } else if (hasGun && p.state !== "dying") {
-    const flashFast = gunTimer < 120;
-    const showOutline = gunTimer > 120 || Math.floor(gunTimer / 8) % 2 === 0;
-    if (showOutline) {
-      ctx.shadowColor = flashFast ? "#0088ff" : "#00aaff";
-      ctx.shadowBlur = flashFast ? 20 : 12;
-      ctx.strokeStyle = flashFast ? "#0066ff" : "#0099ff";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-3, -3, p.w + 6, p.h + 6);
-      ctx.shadowBlur = 0;
-    }
-  }
+  // Power-up glow on body (no outline box)
+  // Glow is applied inline when drawing torso/body below
 
   // Dying animation
   if (state === "dying" && dyingTimer > 0) {
@@ -1692,6 +1673,26 @@ function drawPlayer(
     // --- NOSE ---
     ctx.fillStyle = skinShade;
     ctx.fillRect(11, 9, 2, 2);
+
+    // --- SWEAT DROPS (front-facing, idle/jump) ---
+    if (saltMeter > 50) {
+      const sweatAlpha = Math.min(1, (saltMeter - 50) / 50);
+      ctx.globalAlpha = sweatAlpha * (0.6 + Math.sin(Date.now() * 0.006) * 0.3);
+      ctx.fillStyle = "#55ddff";
+      // Drop on left forehead
+      ctx.beginPath();
+      ctx.ellipse(8, 4 + idleBob, 1.5, 2.5, 0.2, 0, Math.PI * 2);
+      ctx.fill();
+      if (saltMeter > 70) {
+        // Second drop on right side when more salty
+        ctx.globalAlpha = sweatAlpha * 0.7;
+        ctx.beginPath();
+        ctx.ellipse(16, 3 + idleBob, 1.5, 2.5, -0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha =
+        hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0 ? 0.3 : 1;
+    }
   }
 
   if (state === "attacking") {
@@ -1759,6 +1760,42 @@ function drawPlayer(
       ctx.restore();
     }
     // fall through to outer ctx.restore() below - stack always balanced
+  }
+
+  // --- GUN in hand when carrying gun power-up ---
+  if (hasGun && p.state !== "dying" && p.state !== "attacking") {
+    const gunFlash = gunTimer < 120 && Math.floor(gunTimer / 8) % 2 === 0;
+    if (!gunFlash) {
+      const shouldShowGun =
+        gunTimer > 120 || Math.floor(gunTimer / 10) % 2 === 0;
+      if (shouldShowGun) {
+        ctx.save();
+        ctx.shadowColor = "#00aaff";
+        ctx.shadowBlur = gunTimer < 120 ? 10 : 5;
+        // Gun at right side in facing direction (already translated + flipped by ctx)
+        const gx = p.state === "run" ? 17 : 22;
+        const gy = p.state === "run" ? 18 : 16;
+        // Gun body (grey rectangle)
+        ctx.fillStyle = "#888888";
+        ctx.fillRect(gx, gy, 14, 6);
+        // Barrel (slightly darker, extends forward)
+        ctx.fillStyle = "#555555";
+        ctx.fillRect(gx + 10, gy + 1, 8, 4);
+        // Trigger guard
+        ctx.fillStyle = "#666666";
+        ctx.fillRect(gx + 4, gy + 5, 3, 4);
+        // Handle (wood brown)
+        ctx.fillStyle = "#6B3A1F";
+        ctx.fillRect(gx + 2, gy + 5, 7, 6);
+        ctx.fillStyle = "#8B4513";
+        ctx.fillRect(gx + 3, gy + 5, 3, 2);
+        // Muzzle flash hint
+        ctx.fillStyle = "#cccccc";
+        ctx.fillRect(gx + 17, gy + 2, 2, 2);
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+    }
   }
 
   ctx.restore();
