@@ -218,6 +218,16 @@ interface GameState {
     alpha: number;
     size?: number;
   }[];
+  bearStunTimer: number;
+  bearRageCount: number;
+  convictionCombo: number;
+  comboTimer: number;
+  hodlerStreak: number;
+  dodgeStreak: number;
+  nearMissTimer: number;
+  dodgeBoostTimer: number;
+  levelDeaths: number;
+  saltFillReduction: number;
 }
 
 const PLAYER_W = 24;
@@ -290,6 +300,16 @@ function initLevel(gs: GameState, levelIdx: number) {
   gs.damageFlashTimer = 0;
   gs.portfolioFlashGreenTimer = 0;
   gs.ambientParticles = [];
+  gs.bearStunTimer = 0;
+  gs.bearRageCount = 0;
+  gs.convictionCombo = 0;
+  gs.comboTimer = 0;
+  gs.dodgeStreak = 0;
+  gs.nearMissTimer = 0;
+  gs.dodgeBoostTimer = 0;
+  gs.levelDeaths = 0;
+  gs.saltFillReduction = 0;
+  // hodlerStreak intentionally NOT reset here - persists across levels
 
   // Generate random platforms for this level run
   gs.currentPlatforms = generateRandomPlatforms(levelIdx);
@@ -363,6 +383,53 @@ function rectOverlap(
   return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
 }
 
+function triggerBearStun(gs: GameState) {
+  gs.bearStunTimer = 120; // 2 seconds at 60fps
+  gs.bearRageCount++;
+  gs.floatingTexts.push({
+    id: gs.nextFloatTextId++,
+    x: gs.bearX - 20,
+    y: 30,
+    text: "BEAR STUNNED!",
+    timer: 100,
+    color: "#ffffff",
+  });
+  if (gs.bearRageCount > 1) {
+    gs.floatingTexts.push({
+      id: gs.nextFloatTextId++,
+      x: gs.bearX - 30,
+      y: 15,
+      text: "BEAR IS ENRAGED!",
+      timer: 120,
+      color: "#ff4444",
+    });
+  }
+  // Drop a pickup at bear position
+  const dropX = gs.bearX + 10 + Math.random() * 20;
+  const dropY = 62;
+  if (Math.random() < 0.7) {
+    const amount = Math.floor(
+      gs.portfolioValue * (0.04 + Math.random() * 0.04),
+    );
+    gs.maturityBags.push({
+      id: gs.nextMaturityId++,
+      x: dropX,
+      y: dropY,
+      lifetime: 600,
+      maxLifetime: 600,
+      amount,
+      collected: false,
+    });
+  } else {
+    gs.waterBottles.push({
+      x: dropX,
+      y: dropY,
+      collected: false,
+    });
+  }
+  gs.sfxQueue.push("hit");
+}
+
 function updateGame(gs: GameState, _dt: number) {
   if (gs.screen !== "PLAYING") return;
 
@@ -384,6 +451,13 @@ function updateGame(gs: GameState, _dt: number) {
   if (gs.bearThrowAnim > 0) gs.bearThrowAnim--;
   gs.frameCount++;
   if (gs.portfolioTickerFlash > 0) gs.portfolioTickerFlash--;
+  // Combo timer countdown
+  if (gs.comboTimer > 0) {
+    gs.comboTimer--;
+    if (gs.comboTimer === 0) {
+      gs.convictionCombo = 0;
+    }
+  }
   if (gs.bearTauntTimer > 0) gs.bearTauntTimer--;
   if (gs.damageFlashTimer > 0) gs.damageFlashTimer--;
   if (gs.portfolioFlashGreenTimer > 0) gs.portfolioFlashGreenTimer--;
@@ -391,25 +465,35 @@ function updateGame(gs: GameState, _dt: number) {
   // Bear walking across top platform
   const BEAR_PLATFORM_LEFT = 75;
   const BEAR_PLATFORM_RIGHT = 395;
-  if (gs.bearThrowAnim === 0) {
-    gs.bearX += gs.bearDir * 0.67;
-    gs.bearWalkFrame++;
-    if (gs.bearX <= BEAR_PLATFORM_LEFT) {
-      gs.bearX = BEAR_PLATFORM_LEFT;
-      gs.bearDir = 1;
-    } else if (gs.bearX >= BEAR_PLATFORM_RIGHT) {
-      gs.bearX = BEAR_PLATFORM_RIGHT;
-      gs.bearDir = -1;
+  // Bear stun countdown
+  if (gs.bearStunTimer > 0) {
+    gs.bearStunTimer--;
+  }
+  if (gs.bearStunTimer === 0) {
+    if (gs.bearThrowAnim === 0) {
+      gs.bearX += gs.bearDir * 0.67;
+      gs.bearWalkFrame++;
+      if (gs.bearX <= BEAR_PLATFORM_LEFT) {
+        gs.bearX = BEAR_PLATFORM_LEFT;
+        gs.bearDir = 1;
+      } else if (gs.bearX >= BEAR_PLATFORM_RIGHT) {
+        gs.bearX = BEAR_PLATFORM_RIGHT;
+        gs.bearDir = -1;
+      }
+    } else {
+      gs.bearWalkFrame = 0;
     }
-  } else {
-    gs.bearWalkFrame = 0;
   }
   if (gs.bottleWarningTimer > 0) gs.bottleWarningTimer--;
   const level = LEVELS[gs.level];
   const p = gs.player;
 
   // Salt meter passive fill (acts as a pressure timer - faster in later levels)
-  gs.saltMeter = Math.min(100, gs.saltMeter + (0.08 + (gs.level - 1) * 0.015));
+  const saltFillRate = Math.max(
+    0,
+    0.064 + (gs.level - 1) * 0.015 - gs.saltFillReduction,
+  );
+  gs.saltMeter = Math.min(100, gs.saltMeter + saltFillRate);
 
   // Speed modifier
   const walkSpeed =
@@ -466,6 +550,16 @@ function updateGame(gs: GameState, _dt: number) {
         gs.hazards.splice(idx, 1);
       }
     }
+    // Axe can also hit the bear
+    if (p.attackTimer > 0 && gs.bearStunTimer === 0) {
+      const bearDist = Math.hypot(
+        gs.bearX + 21 - (p.x + p.w / 2),
+        62 - (p.y + p.h / 2),
+      );
+      if (bearDist < 80) {
+        triggerBearStun(gs);
+      }
+    }
   }
   // Gun shoot when has gun (and not axe)
   if (gs.keys.has("AxeSmash") && gs.hasGun && !gs.hasAxe && p.hitTimer === 0) {
@@ -489,11 +583,12 @@ function updateGame(gs: GameState, _dt: number) {
   // Salt-based speed penalty (high salt = slower, but jump unaffected)
   const saltSpeedMult =
     gs.saltMeter > 85 ? 0.25 : gs.saltMeter > 70 ? 0.55 : 1.0;
+  const dodgeSpeedBonus = gs.dodgeBoostTimer > 0 ? 1.3 : 1.0;
   if (left) {
-    p.vx = -walkSpeed * saltSpeedMult;
+    p.vx = -walkSpeed * saltSpeedMult * dodgeSpeedBonus;
     p.facing = -1;
   } else if (right) {
-    p.vx = walkSpeed * saltSpeedMult;
+    p.vx = walkSpeed * saltSpeedMult * dodgeSpeedBonus;
     p.facing = 1;
   } else p.vx = 0;
 
@@ -599,9 +694,12 @@ function updateGame(gs: GameState, _dt: number) {
   }
 
   // Bear throw system - all hazards thrown from bear position
-  const bearThrowInterval = Math.max(30, 120 - gs.level * 12);
-  gs.bearThrowTimer++;
-  if (gs.bearThrowTimer >= bearThrowInterval) {
+  const bearThrowInterval = Math.max(
+    20,
+    120 - gs.level * 12 - gs.bearRageCount * 8,
+  );
+  if (gs.bearStunTimer === 0) gs.bearThrowTimer++;
+  if (gs.bearStunTimer === 0 && gs.bearThrowTimer >= bearThrowInterval) {
     gs.bearThrowTimer = 0;
     gs.bearThrowAnim = 35;
     gs.sfxQueue.push("bear_throw");
@@ -781,6 +879,42 @@ function updateGame(gs: GameState, _dt: number) {
       gs.saltMeter = Math.min(100, gs.saltMeter + 0.3);
     }
 
+    // Near-miss and dodge streak tracking
+    if (
+      dist < 40 &&
+      dist > 18 &&
+      p.hitTimer === 0 &&
+      h.type !== "greenCandle" &&
+      h.type !== "redCandle"
+    ) {
+      if (!h.onGround) {
+        gs.dodgeStreak++;
+        if (gs.dodgeStreak % 5 === 0) {
+          gs.dodgeBoostTimer = 90;
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: p.x - 10,
+            y: p.y - 20,
+            text: "CONVICTION!",
+            timer: 80,
+            color: "#ffffff",
+          });
+        }
+      }
+      // Near-miss feedback (rate limited)
+      if (gs.nearMissTimer === 0 && dist < 35) {
+        gs.nearMissTimer = 15;
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: p.x + (Math.random() - 0.5) * 30,
+          y: p.y - 15,
+          text: "CLOSE!",
+          timer: 50,
+          color: "#ff4444",
+        });
+      }
+    }
+
     // Hit detection - skip if level already complete (portal immunity)
     if (gs.levelComplete) continue;
     if (rectOverlap(p.x + 2, p.y + 2, p.w - 4, p.h - 4, h.x, h.y, h.w, h.h)) {
@@ -895,6 +1029,25 @@ function updateGame(gs: GameState, _dt: number) {
       gs.saltMeter = Math.max(0, gs.saltMeter - 30);
       gs.portfolioValue += 500;
       gs.sfxQueue.push("powerup");
+      // Permanently reduce passive fill rate for this level
+      const totalBottlesForLevel = gs.waterBottles.length;
+      if (totalBottlesForLevel > 0) {
+        gs.saltFillReduction +=
+          (0.064 + (gs.level - 1) * 0.015) / totalBottlesForLevel;
+      }
+      // Combo tracking
+      gs.comboTimer = 90;
+      gs.convictionCombo++;
+      if (gs.convictionCombo >= 2) {
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: ka.x,
+          y: ka.y - 25,
+          text: `CONVICTION x${gs.convictionCombo}!`,
+          timer: 80,
+          color: "#ffd700",
+        });
+      }
     }
   }
 
@@ -978,6 +1131,15 @@ function updateGame(gs: GameState, _dt: number) {
         gs.sfxQueue.push("axe_clang");
         break;
       }
+    }
+    // Bullet hits bear
+    const bearHitX = gs.bearX;
+    const bearHitY = 58;
+    if (rectOverlap(b.x, b.y, b.w, b.h, bearHitX - 10, bearHitY - 42, 52, 52)) {
+      if (gs.bearStunTimer === 0) {
+        triggerBearStun(gs);
+      }
+      bulletsToRemove.push(bi);
     }
   }
   for (let i = bulletsToRemove.length - 1; i >= 0; i--) {
@@ -1115,6 +1277,19 @@ function updateGame(gs: GameState, _dt: number) {
         color: "#ffd700",
       });
       gs.sfxQueue.push("powerup");
+      // Combo tracking
+      gs.comboTimer = 90;
+      gs.convictionCombo++;
+      if (gs.convictionCombo >= 2) {
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: mb.x,
+          y: mb.y - 25,
+          text: `CONVICTION x${gs.convictionCombo}!`,
+          timer: 80,
+          color: "#ffd700",
+        });
+      }
       // Coin burst particles
       for (let cp = 0; cp < 5; cp++) {
         const angle = (cp / 5) * Math.PI * 2;
@@ -1154,6 +1329,19 @@ function updateGame(gs: GameState, _dt: number) {
         color: "#00ff88",
       });
       gs.sfxQueue.push("chest_good");
+      // Combo tracking
+      gs.comboTimer = 90;
+      gs.convictionCombo++;
+      if (gs.convictionCombo >= 2) {
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: cb.x,
+          y: cb.y - 25,
+          text: `CONVICTION x${gs.convictionCombo}!`,
+          timer: 80,
+          color: "#ffd700",
+        });
+      }
     }
   }
 
@@ -1289,9 +1477,49 @@ function updateGame(gs: GameState, _dt: number) {
       gs.levelComplete = true;
       gs.portfolioValue += 1000;
       gs.sfxQueue.push("level_complete");
+      // Close call bonus
+      if (gs.saltMeter >= 80) {
+        const closeCallBonus = Math.floor(500 + gs.saltMeter * 50);
+        gs.portfolioValue += closeCallBonus;
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: p.x,
+          y: p.y - 30,
+          text: `SALTY SURVIVOR! +$${closeCallBonus.toLocaleString()}`,
+          timer: 120,
+          color: "#ffd700",
+        });
+      }
+      // Health bonus (lower salt = more bonus)
+      const healthBonus = Math.floor((100 - gs.saltMeter) * 100);
+      if (healthBonus > 0) {
+        gs.portfolioValue += healthBonus;
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: p.x - 20,
+          y: p.y - 50,
+          text: `HEALTH BONUS! +$${healthBonus.toLocaleString()}`,
+          timer: 120,
+          color: "#ffd700",
+        });
+      }
+      // HODLer streak bonus
+      if (gs.levelDeaths === 0) {
+        gs.hodlerStreak++;
+        const hodlerBonus = gs.hodlerStreak * 500;
+        gs.portfolioValue += hodlerBonus;
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: p.x - 30,
+          y: p.y - 70,
+          text: `HODLER BONUS! +$${hodlerBonus.toLocaleString()}`,
+          timer: 140,
+          color: "#ffd700",
+        });
+      }
     } else {
       gs.bottleWarningTimer = 180;
-      loseLife(gs);
+      // Don't kill James - just block the portal and show message
     }
   }
 
@@ -1309,6 +1537,9 @@ function updateGame(gs: GameState, _dt: number) {
 
 function loseLife(gs: GameState) {
   gs.bearTauntTimer = 60;
+  gs.levelDeaths++;
+  gs.hodlerStreak = 0;
+  gs.dodgeStreak = 0;
   gs.lives--;
   if (gs.lives <= 0) {
     gs.sfxQueue.push("game_over");
@@ -1808,6 +2039,7 @@ function drawBear(
   throwAnim = 0,
   walkFrame = 0,
   tauntTimer = 0,
+  stunTimer = 0,
 ) {
   ctx.save();
   ctx.translate(bx, by);
@@ -2097,6 +2329,15 @@ function drawBear(
   ctx.fillText("$", 17, 35);
   ctx.shadowBlur = 0;
 
+  // Stun flash overlay
+  if (stunTimer > 0 && Math.floor(stunTimer / 4) % 2 === 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(-5, -42, 52, 52);
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
   ctx.restore();
 }
 
@@ -4336,15 +4577,29 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
 
   // Floating texts
   for (const ft of gs.floatingTexts) {
-    const alpha = Math.min(1, ft.timer / 30);
+    const alpha = ft.timer < 30 ? ft.timer / 30 : 1;
+    const scale =
+      ft.timer > 75 ? 1.5 - ((1 - ft.timer / 90) * 0.5) / (15 / 90) : 1.0;
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.shadowColor = ft.color;
-    ctx.shadowBlur = 8;
-    ctx.font = "bold 10px monospace";
+    ctx.shadowBlur =
+      ft.color === "#ffd700"
+        ? 10
+        : ft.color === "#ff4444"
+          ? 8
+          : ft.color === "#00ff88"
+            ? 10
+            : 6;
+    const fontSize = ft.text.length > 20 ? 8 : 10;
+    ctx.font = `bold ${fontSize}px monospace`;
     ctx.fillStyle = ft.color;
     ctx.textAlign = "center";
-    ctx.fillText(ft.text, ft.x, ft.y);
+    ctx.save();
+    ctx.translate(ft.x, ft.y);
+    ctx.scale(scale, scale);
+    ctx.fillText(ft.text, 0, 0);
+    ctx.restore();
     ctx.textAlign = "left";
     ctx.restore();
   }
@@ -4364,6 +4619,7 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     gs.bearThrowAnim,
     gs.bearWalkFrame,
     gs.bearTauntTimer,
+    gs.bearStunTimer,
   );
 
   // Steam particles
@@ -4583,6 +4839,16 @@ export default function Game() {
     damageFlashTimer: 0,
     portfolioFlashGreenTimer: 0,
     ambientParticles: [],
+    bearStunTimer: 0,
+    bearRageCount: 0,
+    convictionCombo: 0,
+    comboTimer: 0,
+    hodlerStreak: 0,
+    dodgeStreak: 0,
+    nearMissTimer: 0,
+    dodgeBoostTimer: 0,
+    levelDeaths: 0,
+    saltFillReduction: 0,
   });
   const rafRef = useRef<number>(0);
   const prevScreenRef = useRef<GameScreen>("TITLE");
@@ -4745,6 +5011,16 @@ export default function Game() {
     gs.damageFlashTimer = 0;
     gs.portfolioFlashGreenTimer = 0;
     gs.ambientParticles = [];
+    gs.bearStunTimer = 0;
+    gs.bearRageCount = 0;
+    gs.convictionCombo = 0;
+    gs.comboTimer = 0;
+    gs.hodlerStreak = 0;
+    gs.dodgeStreak = 0;
+    gs.nearMissTimer = 0;
+    gs.dodgeBoostTimer = 0;
+    gs.levelDeaths = 0;
+    gs.saltFillReduction = 0;
   }, []);
 
   const handleSpace = useCallback(() => {
