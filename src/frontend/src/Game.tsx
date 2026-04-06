@@ -1773,6 +1773,7 @@ function updateGame(gs: GameState, _dt: number) {
   const exit = level.exitPosition;
   if (
     !gs.levelComplete &&
+    p.y + p.h <= exit.y + 15 &&
     rectOverlap(p.x, p.y, p.w, p.h, exit.x - 16, exit.y - 16, 36, 36)
   ) {
     const allBottlesCollected = gs.waterBottles.every((k) => k.collected);
@@ -5743,7 +5744,8 @@ interface HudData {
 
 export default function Game() {
   const liteModeRef = useRef(
-    /Tesla|QtWebEngine|CrMo/.test(navigator.userAgent),
+    /Tesla|QtWebEngine|CrMo/.test(navigator.userAgent) ||
+      /iPhone|iPad|iPod|Android/.test(navigator.userAgent),
   );
   const liteMode = liteModeRef.current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -5828,11 +5830,7 @@ export default function Game() {
   const [leaderboard, setLeaderboard] = useState<
     { name: string; score: number }[]
   >(() => {
-    try {
-      return JSON.parse(localStorage.getItem("saltmine_leaderboard") || "[]");
-    } catch {
-      return [];
-    }
+    return [];
   });
   const [showNameEntry, setShowNameEntry] = useState(false);
   const [pendingScore, setPendingScore] = useState(0);
@@ -5938,8 +5936,8 @@ export default function Game() {
   );
 
   const submitScore = useCallback(() => {
-    if (!nameInput.trim()) return;
-    const newEntry = { name: nameInput.trim(), score: pendingScore };
+    const name = nameInput.trim() || "James Salt";
+    const newEntry = { name, score: pendingScore };
     const updated = [...leaderboard, newEntry]
       .sort((a, b) => b.score - a.score)
       .slice(0, 10);
@@ -6858,7 +6856,7 @@ export default function Game() {
             </div>
 
             <div style={{ fontSize: 13, color: "#ffd700", marginTop: 8 }}>
-              ⛏ ENTER YOUR NAME
+              ⛏ ENTER YOUR NAME (optional)
             </div>
             <input
               maxLength={12}
@@ -6868,7 +6866,7 @@ export default function Game() {
                 if (e.key === "Enter") submitScore();
               }}
               data-ocid="leaderboard.input"
-              placeholder="YOUR NAME"
+              placeholder="JAMES SALT"
               style={{
                 background: "#1a1a2e",
                 color: "#ffd700",
@@ -6882,6 +6880,9 @@ export default function Game() {
                 boxSizing: "border-box",
               }}
             />
+            <div style={{ fontSize: 10, color: "#888", textAlign: "center" }}>
+              Leave blank to submit as James Salt
+            </div>
             <button
               type="button"
               onClick={submitScore}
@@ -6900,7 +6901,7 @@ export default function Game() {
                 width: "100%",
               }}
             >
-              SUBMIT
+              SUBMIT SCORE
             </button>
 
             <div
