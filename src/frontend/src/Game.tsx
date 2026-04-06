@@ -57,6 +57,7 @@ interface Hazard {
   fallsThrough?: boolean;
   flagged?: "explode" | "fade";
   flagTimer?: number;
+  slowTimer?: number;
 }
 
 interface WaterBottle {
@@ -93,18 +94,32 @@ interface FloatingText {
   color: string;
 }
 
-interface AxePickup {
+interface SpawnedPickup {
+  id: number;
   x: number;
   y: number;
-  vy: number;
+  type:
+    | "pickaxe"
+    | "gun"
+    | "dynamite"
+    | "saltshaker"
+    | "hardhat"
+    | "bubble"
+    | "speedboots"
+    | "magnet"
+    | "portfolioshield";
+  lifetime: number;
+  maxLifetime: number;
   collected: boolean;
-  landed: boolean;
 }
 
-interface GunPickup {
+interface Dynamite {
+  id: number;
   x: number;
   y: number;
-  collected: boolean;
+  vx: number;
+  vy: number;
+  timer: number;
 }
 
 interface Bullet {
@@ -142,9 +157,23 @@ interface GameState {
   hazards: Hazard[];
   waterBottles: WaterBottle[];
   spawnerStates: SpawnerState[];
-  hasAxe: boolean;
-  axeTimer: number;
-  axePickups: AxePickup[];
+  currentWeapon:
+    | "pickaxe"
+    | "gun"
+    | "dynamite"
+    | "saltshaker"
+    | "hardhat"
+    | null;
+  weaponTimer: number;
+  weaponSpawnTimer: number;
+  spawnedPickups: SpawnedPickup[];
+  nextPickupId: number;
+  dynamites: Dynamite[];
+  nextDynamiteId: number;
+  hasBubble: boolean;
+  speedBootsTimer: number;
+  magnetTimer: number;
+  portfolioShieldTimer: number;
   portfolioMultiplier: number;
   maturityBags: MaturityBag[];
   communityBags: CommunityBag[];
@@ -172,10 +201,7 @@ interface GameState {
   bearX: number;
   bearDir: number;
   bearWalkFrame: number;
-  hasGun: boolean;
-  gunTimer: number;
   gunCooldown: number;
-  gunPickups: GunPickup[];
   bullets: Bullet[];
   nextBulletId: number;
   explosionProjectiles: ExplosionProjectile[];
@@ -230,8 +256,8 @@ interface GameState {
   saltFillReduction: number;
 }
 
-const PLAYER_W = 24;
-const PLAYER_H = 36;
+const PLAYER_W = 32;
+const PLAYER_H = 48;
 const GRAVITY = 0.45;
 const JUMP_VY = -10.5;
 const BASE_WALK = 2.6;
@@ -259,9 +285,17 @@ function initLevel(gs: GameState, levelIdx: number) {
   gs.player = makePlayer(levelIdx);
   gs.hazards = [];
   gs.spawnerStates = [];
-  gs.hasAxe = false;
-  gs.axeTimer = 0;
-  gs.axePickups = [];
+  gs.currentWeapon = null;
+  gs.weaponTimer = 0;
+  gs.weaponSpawnTimer = 60;
+  gs.spawnedPickups = [];
+  gs.nextPickupId = 1;
+  gs.dynamites = [];
+  gs.nextDynamiteId = 1;
+  gs.hasBubble = false;
+  gs.speedBootsTimer = 0;
+  gs.magnetTimer = 0;
+  gs.portfolioShieldTimer = 0;
   gs.portfolioMultiplier = 1.0;
   gs.maturityBags = [];
   gs.communityBags = [];
@@ -282,10 +316,7 @@ function initLevel(gs: GameState, levelIdx: number) {
   gs.bearX = 200;
   gs.bearDir = 1;
   gs.bearWalkFrame = 0;
-  gs.hasGun = false;
-  gs.gunTimer = 0;
   gs.gunCooldown = 0;
-  gs.gunPickups = [];
   gs.bullets = [];
   gs.nextBulletId = 1;
   gs.explosionProjectiles = [];
@@ -333,38 +364,6 @@ function initLevel(gs: GameState, levelIdx: number) {
     gs.waterBottles.push({
       x: plat.x + 10 + Math.random() * Math.max(0, plat.w - 20),
       y: plat.y - 18,
-      collected: false,
-    });
-  }
-
-  // Place axe pickups randomly on mid platforms
-  const midPlats = gs.currentPlatforms.filter(
-    (p) => p.y < CANVAS_H - 50 && p.y > CANVAS_H - 550,
-  );
-  const numAxes = 1 + Math.floor(levelIdx / 4);
-  gs.axePickups = [];
-  for (let i = 0; i < Math.min(numAxes, 2); i++) {
-    const plat = midPlats[Math.floor(Math.random() * midPlats.length)];
-    if (plat) {
-      gs.axePickups.push({
-        x: plat.x + 20 + Math.random() * Math.max(0, plat.w - 40),
-        y: plat.y - 16,
-        vy: 0,
-        collected: false,
-        landed: true,
-      });
-    }
-  }
-
-  // Spawn gun pickup on a random mid platform (different from axe)
-  const gunPlats = gs.currentPlatforms.filter(
-    (p) => p.y < CANVAS_H - 50 && p.y > CANVAS_H - 550,
-  );
-  if (gunPlats.length > 0) {
-    const plat = gunPlats[Math.floor(Math.random() * gunPlats.length)];
-    gs.gunPickups.push({
-      x: plat.x + 20 + Math.random() * Math.max(0, plat.w - 40),
-      y: plat.y - 16,
       collected: false,
     });
   }
@@ -517,64 +516,108 @@ function updateGame(gs: GameState, _dt: number) {
   const right = gs.keys.has("ArrowRight");
   const jumping = gs.keys.has("Space") || gs.keys.has("KeyZ");
 
-  // AxeSmash: proactive range smash from gamepad B button
-  if (gs.keys.has("AxeSmash") && gs.hasAxe && p.hitTimer === 0) {
-    const smashed: number[] = [];
-    for (let i = 0; i < gs.hazards.length; i++) {
-      const h = gs.hazards[i];
-      const dist = Math.hypot(
-        h.x + h.w / 2 - (p.x + p.w / 2),
-        h.y + h.h / 2 - (p.y + p.h / 2),
-      );
-      if (dist < 60) smashed.push(i);
-    }
-    // Always trigger animation on press (not held)
-    if (p.attackTimer === 0) {
-      gs.sfxQueue.push("axe_whoosh");
-      p.attackTimer = 20;
-      p.attackClangPlayed = smashed.length === 0; // skip clang if nothing to smash
-    }
-    if (smashed.length > 0) {
-      for (let si = smashed.length - 1; si >= 0; si--) {
-        const idx = smashed[si];
-        const h = gs.hazards[idx];
-        if (h.type === "chest") {
-          gs.portfolioMultiplier = Math.min(2.5, gs.portfolioMultiplier + 0.15);
-          gs.portfolioValue += 2000;
-          gs.portfolioTickerFlash = 40;
-          gs.portfolioTickerDir = 1;
-          gs.sfxQueue.push("chest_good");
-        } else if (h.type !== "greenCandle" && h.type !== "redCandle") {
-          gs.portfolioValue += 150;
+  // B button weapon actions
+  if (gs.keys.has("AxeSmash") && p.hitTimer === 0) {
+    if (gs.currentWeapon === "pickaxe") {
+      const smashed: number[] = [];
+      for (let i = 0; i < gs.hazards.length; i++) {
+        const h = gs.hazards[i];
+        const dist = Math.hypot(
+          h.x + h.w / 2 - (p.x + p.w / 2),
+          h.y + h.h / 2 - (p.y + p.h / 2),
+        );
+        if (dist < 60) smashed.push(i);
+      }
+      if (p.attackTimer === 0) {
+        gs.sfxQueue.push("axe_whoosh");
+        p.attackTimer = 20;
+        p.attackClangPlayed = smashed.length === 0;
+      }
+      if (smashed.length > 0) {
+        for (let si = smashed.length - 1; si >= 0; si--) {
+          const idx = smashed[si];
+          const h = gs.hazards[idx];
+          if (h.type === "chest") {
+            gs.portfolioMultiplier = Math.min(
+              2.5,
+              gs.portfolioMultiplier + 0.15,
+            );
+            gs.portfolioValue += 2000;
+            gs.portfolioTickerFlash = 40;
+            gs.portfolioTickerDir = 1;
+            gs.sfxQueue.push("chest_good");
+          } else if (h.type !== "greenCandle" && h.type !== "redCandle") {
+            gs.portfolioValue += 150;
+          }
+          gs.hazards.splice(idx, 1);
         }
-        gs.hazards.splice(idx, 1);
       }
-    }
-    // Axe can also hit the bear
-    if (p.attackTimer > 0 && gs.bearStunTimer === 0) {
-      const bearDist = Math.hypot(
-        gs.bearX + 21 - (p.x + p.w / 2),
-        62 - (p.y + p.h / 2),
-      );
-      if (bearDist < 80) {
-        triggerBearStun(gs);
+      if (p.attackTimer > 0 && gs.bearStunTimer === 0) {
+        const bearDist = Math.hypot(
+          gs.bearX + 21 - (p.x + p.w / 2),
+          62 - (p.y + p.h / 2),
+        );
+        if (bearDist < 80) triggerBearStun(gs);
       }
-    }
-  }
-  // Gun shoot when has gun (and not axe)
-  if (gs.keys.has("AxeSmash") && gs.hasGun && !gs.hasAxe && p.hitTimer === 0) {
-    if (gs.gunCooldown <= 0) {
-      gs.sfxQueue.push("powerup");
-      gs.bullets.push({
-        id: gs.nextBulletId++,
-        x: p.x + (p.facing === 1 ? p.w : -16),
-        y: p.y + p.h / 2 - 3,
-        vx: p.facing * 8,
-        w: 16,
-        h: 6,
-        lifetime: 60,
+    } else if (gs.currentWeapon === "gun") {
+      if (gs.gunCooldown <= 0) {
+        gs.sfxQueue.push("powerup");
+        gs.bullets.push({
+          id: gs.nextBulletId++,
+          x: p.x + (p.facing === 1 ? p.w : -16),
+          y: p.y + p.h / 2 - 3,
+          vx: p.facing * 8,
+          w: 16,
+          h: 6,
+          lifetime: 60,
+        });
+        gs.gunCooldown = 15;
+      }
+      // Gun also stuns bear if close
+      if (gs.gunCooldown <= 0 && gs.bearStunTimer === 0) {
+        const bearDist = Math.hypot(
+          gs.bearX + 21 - (p.x + p.w / 2),
+          62 - (p.y + p.h / 2),
+        );
+        if (bearDist < 100) triggerBearStun(gs);
+      }
+    } else if (gs.currentWeapon === "dynamite") {
+      // Throw dynamite forward in arc - one-use
+      gs.dynamites.push({
+        id: gs.nextDynamiteId++,
+        x: p.x + p.w / 2,
+        y: p.y + p.h / 2,
+        vx: p.facing * 5,
+        vy: -6,
+        timer: 90,
       });
-      gs.gunCooldown = 15;
+      gs.currentWeapon = null;
+      gs.weaponTimer = 0;
+      gs.sfxQueue.push("axe_whoosh");
+      gs.floatingTexts.push({
+        id: gs.nextFloatTextId++,
+        x: p.x,
+        y: p.y - 20,
+        text: "FIRE IN THE HOLE!",
+        timer: 80,
+        color: "#ff6600",
+      });
+    } else if (gs.currentWeapon === "saltshaker") {
+      // Slow all on-screen hazards
+      for (const h of gs.hazards) {
+        h.slowTimer = 300;
+      }
+      gs.currentWeapon = null;
+      gs.weaponTimer = 0;
+      gs.sfxQueue.push("powerup");
+      gs.floatingTexts.push({
+        id: gs.nextFloatTextId++,
+        x: p.x,
+        y: p.y - 20,
+        text: "SALT SHOWER!",
+        timer: 80,
+        color: "#88ddff",
+      });
     }
   }
   if (gs.gunCooldown > 0) gs.gunCooldown--;
@@ -584,11 +627,12 @@ function updateGame(gs: GameState, _dt: number) {
   const saltSpeedMult =
     gs.saltMeter > 85 ? 0.25 : gs.saltMeter > 70 ? 0.55 : 1.0;
   const dodgeSpeedBonus = gs.dodgeBoostTimer > 0 ? 1.3 : 1.0;
+  const speedBootsBonus = gs.speedBootsTimer > 0 ? 1.4 : 1.0;
   if (left) {
-    p.vx = -walkSpeed * saltSpeedMult * dodgeSpeedBonus;
+    p.vx = -walkSpeed * saltSpeedMult * dodgeSpeedBonus * speedBootsBonus;
     p.facing = -1;
   } else if (right) {
-    p.vx = walkSpeed * saltSpeedMult * dodgeSpeedBonus;
+    p.vx = walkSpeed * saltSpeedMult * dodgeSpeedBonus * speedBootsBonus;
     p.facing = 1;
   } else p.vx = 0;
 
@@ -806,6 +850,12 @@ function updateGame(gs: GameState, _dt: number) {
       h.y += h.vy;
       h.rotation += h.vx * 0.08;
 
+      // Apply slow effect
+      if (h.slowTimer && h.slowTimer > 0) {
+        h.slowTimer--;
+        h.vx *= 0.85;
+        h.vy *= 0.85;
+      }
       // Platform collision (flat one-way)
       h.wasOnGround = h.onGround;
       h.onGround = false;
@@ -819,11 +869,12 @@ function updateGame(gs: GameState, _dt: number) {
             h.onGround = true;
             // Only randomize direction when FIRST landing on a new platform
             if (!h.wasOnGround) {
-              const rollSpeed = Math.max(Math.abs(h.vx), 2.2 + gs.level * 0.3);
-              h.vx = (Math.random() < 0.5 ? -1 : 1) * rollSpeed;
+              const baseSpeed = Math.max(Math.abs(h.vx), 2.2 + gs.level * 0.3);
+              const slowMult = h.slowTimer && h.slowTimer > 0 ? 0.3 : 1.0;
+              h.vx = (Math.random() < 0.5 ? -1 : 1) * baseSpeed * slowMult;
             }
             // Maintain rolling speed while on ground (don't let friction stop it)
-            if (Math.abs(h.vx) < 1.5) {
+            if (Math.abs(h.vx) < 1.5 && !(h.slowTimer && h.slowTimer > 0)) {
               h.vx = (h.vx >= 0 ? 1 : -1) * (1.5 + gs.level * 0.1);
             }
           }
@@ -920,7 +971,7 @@ function updateGame(gs: GameState, _dt: number) {
     if (rectOverlap(p.x + 2, p.y + 2, p.w - 4, p.h - 4, h.x, h.y, h.w, h.h)) {
       // Chest interaction
       if (h.type === "chest") {
-        if (gs.hasAxe) {
+        if (gs.currentWeapon === "pickaxe") {
           gs.portfolioMultiplier = Math.min(2.5, gs.portfolioMultiplier + 0.15);
           gs.portfolioValue += 2000;
           p.hitTimer = 10;
@@ -959,24 +1010,39 @@ function updateGame(gs: GameState, _dt: number) {
       }
       // Red candle - hurts portfolio, no physical damage
       if (h.type === "redCandle") {
-        gs.portfolioMultiplier = Math.max(
-          0.3,
-          gs.portfolioMultiplier - 0.06 - Math.random() * 0.04,
-        );
-        gs.floatingTexts.push({
-          id: gs.nextFloatTextId++,
-          x: h.x,
-          y: h.y - 10,
-          text: "-Portfolio!",
-          timer: 90,
-          color: "#ff4444",
-        });
+        if (gs.portfolioShieldTimer > 0) {
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: h.x,
+            y: h.y - 10,
+            text: "SHIELD BLOCKED!",
+            timer: 90,
+            color: "#ffd700",
+          });
+        } else {
+          gs.portfolioMultiplier = Math.max(
+            0.3,
+            gs.portfolioMultiplier - 0.06 - Math.random() * 0.04,
+          );
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: h.x,
+            y: h.y - 10,
+            text: "-Portfolio!",
+            timer: 90,
+            color: "#ff4444",
+          });
+        }
         toRemove.push(i);
         continue;
       }
 
       // Axe smashes other hazards ONLY when actively swinging
-      if (gs.hasAxe && p.attackTimer > 0 && p.hitTimer === 0) {
+      if (
+        gs.currentWeapon === "pickaxe" &&
+        p.attackTimer > 0 &&
+        p.hitTimer === 0
+      ) {
         gs.portfolioValue += 150;
         gs.sfxQueue.push("axe_swing");
         toRemove.push(i);
@@ -996,6 +1062,55 @@ function updateGame(gs: GameState, _dt: number) {
 
       // Normal hit
       if (p.hitTimer === 0) {
+        // Hard hat absorbs hit
+        if (gs.currentWeapon === "hardhat") {
+          gs.currentWeapon = null;
+          gs.weaponTimer = 0;
+          gs.sfxQueue.push("axe_clang");
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: p.x,
+            y: p.y - 20,
+            text: "HARD HAT SAVED YOU!",
+            timer: 100,
+            color: "#ffd700",
+          });
+          gs.screenShake = 4;
+          p.hitTimer = 30;
+          toRemove.push(i);
+          continue;
+        }
+        // Bubble absorbs hit with dramatic pop
+        if (gs.hasBubble) {
+          gs.hasBubble = false;
+          gs.sfxQueue.push("hit");
+          gs.screenShake = 12;
+          gs.damageFlashTimer = 8;
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: p.x,
+            y: p.y - 20,
+            text: "BUBBLE POPPED!",
+            timer: 100,
+            color: "#88ddff",
+          });
+          // Big pop particle burst
+          for (let sp = 0; sp < 18; sp++) {
+            const angle = (sp / 18) * Math.PI * 2;
+            gs.sparkParticles.push({
+              x: p.x + p.w / 2,
+              y: p.y + p.h / 2,
+              vx: Math.cos(angle) * (3 + Math.random() * 4),
+              vy: Math.sin(angle) * (3 + Math.random() * 4),
+              alpha: 1,
+              color:
+                sp % 3 === 0 ? "#ffffff" : sp % 3 === 1 ? "#88ddff" : "#aaffff",
+            });
+          }
+          p.hitTimer = 30;
+          toRemove.push(i);
+          continue;
+        }
         gs.damageFlashTimer = 10;
         gs.saltMeter = Math.min(100, gs.saltMeter + 15);
         p.hitTimer = 60;
@@ -1051,63 +1166,251 @@ function updateGame(gs: GameState, _dt: number) {
     }
   }
 
-  // Axe pickup - fall physics and collection
-  for (const ap of gs.axePickups) {
-    if (ap.collected) continue;
-    if (!ap.landed) {
-      ap.vy += GRAVITY * 0.6;
-      ap.y += ap.vy;
-      for (const plat of gs.currentPlatforms) {
-        if (ap.x + 16 > plat.x && ap.x < plat.x + plat.w) {
-          const prevB = ap.y + 16 - ap.vy;
-          if (ap.vy >= 0 && prevB <= plat.y + 2 && ap.y + 16 >= plat.y) {
-            ap.y = plat.y - 16;
-            ap.vy = 0;
-            ap.landed = true;
-            break;
-          }
-        }
-      }
-      if (ap.y > CANVAS_H + 20) {
-        ap.collected = true;
+  // Weapon spawn timer
+  gs.weaponSpawnTimer--;
+  if (gs.weaponSpawnTimer <= 0) {
+    const midPlats = gs.currentPlatforms.filter(
+      (pl) => pl.y < CANVAS_H - 50 && pl.y > CANVAS_H - 550,
+    );
+    if (midPlats.length > 0) {
+      const plat = midPlats[Math.floor(Math.random() * midPlats.length)];
+      const allTypes: SpawnedPickup["type"][] = [
+        "pickaxe",
+        "gun",
+        "dynamite",
+        "saltshaker",
+        "hardhat",
+        "bubble",
+        "speedboots",
+        "magnet",
+        "portfolioshield",
+      ];
+      const pickedType = allTypes[Math.floor(Math.random() * allTypes.length)];
+      gs.spawnedPickups.push({
+        id: gs.nextPickupId++,
+        x: plat.x + 10 + Math.random() * Math.max(0, plat.w - 20),
+        y: plat.y - 20,
+        type: pickedType,
+        lifetime: 600,
+        maxLifetime: 600,
+        collected: false,
+      });
+    }
+    gs.weaponSpawnTimer = 1200 + Math.random() * 600;
+  }
+
+  // Spawned pickup update (lifetime, magnet pull, collection)
+  for (let spi = gs.spawnedPickups.length - 1; spi >= 0; spi--) {
+    const sp2 = gs.spawnedPickups[spi];
+    if (sp2.collected) {
+      gs.spawnedPickups.splice(spi, 1);
+      continue;
+    }
+    sp2.lifetime--;
+    if (sp2.lifetime <= 0) {
+      gs.spawnedPickups.splice(spi, 1);
+      continue;
+    }
+    // Magnet pull toward uncollected pickups
+    if (gs.magnetTimer > 0) {
+      const dx = p.x + p.w / 2 - (sp2.x + 8);
+      const dy = p.y + p.h / 2 - (sp2.y + 8);
+      const dist2 = Math.sqrt(dx * dx + dy * dy);
+      if (dist2 < 90 && dist2 > 0) {
+        sp2.x += (dx / dist2) * 4;
+        sp2.y += (dy / dist2) * 4;
       }
     }
-    if (!ap.collected && rectOverlap(p.x, p.y, p.w, p.h, ap.x, ap.y, 16, 16)) {
-      ap.collected = true;
-      gs.hasAxe = true;
-      gs.axeTimer = 600;
+    if (rectOverlap(p.x, p.y, p.w, p.h, sp2.x, sp2.y, 18, 18)) {
+      sp2.collected = true;
       gs.sfxQueue.push("powerup");
+      const isWeapon = [
+        "pickaxe",
+        "gun",
+        "dynamite",
+        "saltshaker",
+        "hardhat",
+      ].includes(sp2.type);
+      if (isWeapon) {
+        gs.currentWeapon = sp2.type as
+          | "pickaxe"
+          | "gun"
+          | "dynamite"
+          | "saltshaker"
+          | "hardhat";
+        // weapon timers: dynamite/hardhat are use-based (we still give a timer for display)
+        gs.weaponTimer =
+          sp2.type === "dynamite" || sp2.type === "hardhat" ? 9999 : 600;
+        const labels: Record<string, string> = {
+          pickaxe: "PICKAXE!",
+          gun: "GUN!",
+          dynamite: "DYNAMITE!",
+          saltshaker: "SALT SHAKER!",
+          hardhat: "HARD HAT!",
+        };
+        const colors: Record<string, string> = {
+          pickaxe: "#ffd700",
+          gun: "#00ff88",
+          dynamite: "#ff6600",
+          saltshaker: "#88ddff",
+          hardhat: "#ffee00",
+        };
+        gs.floatingTexts.push({
+          id: gs.nextFloatTextId++,
+          x: sp2.x,
+          y: sp2.y - 10,
+          text: labels[sp2.type] || "WEAPON!",
+          timer: 80,
+          color: colors[sp2.type] || "#ffffff",
+        });
+      } else {
+        // Power-up
+        if (sp2.type === "bubble") {
+          gs.hasBubble = true;
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: sp2.x,
+            y: sp2.y - 10,
+            text: "BUBBLE SHIELD!",
+            timer: 80,
+            color: "#88ddff",
+          });
+        } else if (sp2.type === "speedboots") {
+          gs.speedBootsTimer = 480;
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: sp2.x,
+            y: sp2.y - 10,
+            text: "SPEED BOOST!",
+            timer: 80,
+            color: "#ff9900",
+          });
+        } else if (sp2.type === "magnet") {
+          gs.magnetTimer = 480;
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: sp2.x,
+            y: sp2.y - 10,
+            text: "MAGNET!",
+            timer: 80,
+            color: "#cc44ff",
+          });
+        } else if (sp2.type === "portfolioshield") {
+          gs.portfolioShieldTimer = 480;
+          gs.floatingTexts.push({
+            id: gs.nextFloatTextId++,
+            x: sp2.x,
+            y: sp2.y - 10,
+            text: "PORTFOLIO SHIELD!",
+            timer: 80,
+            color: "#ffd700",
+          });
+        }
+      }
     }
   }
 
-  // Axe countdown
-  if (gs.hasAxe) {
-    gs.axeTimer--;
-    if (gs.axeTimer <= 0) {
-      gs.hasAxe = false;
-      gs.axeTimer = 0;
+  // Magnet also pulls water bottles, maturity bags
+  if (gs.magnetTimer > 0) {
+    for (const wb of gs.waterBottles) {
+      if (wb.collected) continue;
+      const dx = p.x + p.w / 2 - (wb.x + 6);
+      const dy = p.y + p.h / 2 - (wb.y + 9);
+      const dist2 = Math.sqrt(dx * dx + dy * dy);
+      if (dist2 < 90 && dist2 > 0) {
+        wb.x += (dx / dist2) * 4;
+        wb.y += (dy / dist2) * 4;
+      }
+    }
+    for (const mb of gs.maturityBags) {
+      if (mb.collected) continue;
+      const dx = p.x + p.w / 2 - (mb.x + 8);
+      const dy = p.y + p.h / 2 - (mb.y + 10);
+      const dist2 = Math.sqrt(dx * dx + dy * dy);
+      if (dist2 < 90 && dist2 > 0) {
+        mb.x += (dx / dist2) * 4;
+        mb.y += (dy / dist2) * 4;
+      }
     }
   }
+
+  // Weapon countdown (non use-based weapons)
+  if (
+    gs.currentWeapon &&
+    gs.currentWeapon !== "dynamite" &&
+    gs.currentWeapon !== "hardhat"
+  ) {
+    gs.weaponTimer--;
+    if (gs.weaponTimer <= 0) {
+      gs.currentWeapon = null;
+      gs.weaponTimer = 0;
+    }
+  }
+
+  // Power-up countdowns
+  if (gs.speedBootsTimer > 0) gs.speedBootsTimer--;
+  if (gs.magnetTimer > 0) gs.magnetTimer--;
+  if (gs.portfolioShieldTimer > 0) gs.portfolioShieldTimer--;
 
   // Debuff countdown
   if (gs.debuffTimer > 0) gs.debuffTimer--;
 
-  // Gun pickup collection
-  for (const gp of gs.gunPickups) {
-    if (gp.collected) continue;
-    if (rectOverlap(p.x, p.y, p.w, p.h, gp.x, gp.y, 16, 16)) {
-      gp.collected = true;
-      gs.hasGun = true;
-      gs.gunTimer = 500;
-      gs.sfxQueue.push("powerup");
+  // Dynamite physics and explosion
+  for (let di = gs.dynamites.length - 1; di >= 0; di--) {
+    const dyn = gs.dynamites[di];
+    dyn.x += dyn.vx;
+    dyn.y += dyn.vy;
+    dyn.vy += GRAVITY * 0.8;
+    // Bounce on platforms
+    for (const plat of gs.currentPlatforms) {
+      if (dyn.x + 6 > plat.x && dyn.x - 6 < plat.x + plat.w) {
+        const prevB = dyn.y - dyn.vy;
+        if (dyn.vy >= 0 && prevB <= plat.y + 2 && dyn.y >= plat.y) {
+          dyn.y = plat.y;
+          dyn.vy = -Math.abs(dyn.vy) * 0.4;
+        }
+      }
     }
-  }
-  // Gun countdown
-  if (gs.hasGun) {
-    gs.gunTimer--;
-    if (gs.gunTimer <= 0) {
-      gs.hasGun = false;
-      gs.gunTimer = 0;
+    dyn.timer--;
+    if (dyn.timer <= 0) {
+      // EXPLODE - destroy all hazards within 80px
+      gs.sfxQueue.push("axe_clang");
+      gs.screenShake = 14;
+      gs.damageFlashTimer = 12;
+      for (let hi2 = gs.hazards.length - 1; hi2 >= 0; hi2--) {
+        const h2 = gs.hazards[hi2];
+        const dist3 = Math.hypot(
+          h2.x + h2.w / 2 - dyn.x,
+          h2.y + h2.h / 2 - dyn.y,
+        );
+        if (dist3 < 80) {
+          gs.hazards.splice(hi2, 1);
+          gs.portfolioValue += 100;
+        }
+      }
+      // Blast particles
+      for (let ep2 = 0; ep2 < 20; ep2++) {
+        const angle = (ep2 / 20) * Math.PI * 2;
+        const spd = 3 + Math.random() * 5;
+        gs.explosionProjectiles.push({
+          id: gs.nextExplosionId++,
+          x: dyn.x,
+          y: dyn.y,
+          vx: Math.cos(angle) * spd,
+          vy: Math.sin(angle) * spd,
+          lifetime: 30,
+          maxLifetime: 30,
+        });
+      }
+      gs.floatingTexts.push({
+        id: gs.nextFloatTextId++,
+        x: dyn.x,
+        y: dyn.y - 20,
+        text: "💥 BOOM!",
+        timer: 90,
+        color: "#ff6600",
+      });
+      gs.dynamites.splice(di, 1);
     }
   }
 
@@ -1557,14 +1860,48 @@ function drawPlayer(
   ctx: CanvasRenderingContext2D,
   p: Player,
   saltMeter: number,
-  hasAxe: boolean,
-  axeTimer = 600,
+  currentWeapon:
+    | "pickaxe"
+    | "gun"
+    | "dynamite"
+    | "saltshaker"
+    | "hardhat"
+    | null,
+  weaponTimer = 600,
   dyingTimer = 0,
-  hasGun = false,
-  gunTimer = 600,
+  hasBubble = false,
+  speedBootsTimer = 0,
+  magnetTimer = 0,
+  portfolioShieldTimer = 0,
+  liteMode = false,
 ) {
+  const hasAxe = currentWeapon === "pickaxe";
+  const axeTimer = hasAxe ? weaponTimer : 600;
+  const hasGun = currentWeapon === "gun";
+  const gunTimer = hasGun ? weaponTimer : 600;
   const { x, y, facing, state, hitTimer, frame } = p;
   const flipped = facing === -1;
+
+  // Colors
+  const skinBase = "#7B4A2D";
+  const skinShad = "#5C3318";
+  const skinHi = "#9B6040";
+  const shirtBase = "#d4d4d4";
+  const shirtShad = "#a8a8a8";
+  const shirtHi = "#efefef";
+  const pantsBase = "#1a1a3a";
+  const pantsHi = "#2a2a5a";
+  const capBody = "#1a1a4a";
+  const capBrimSh = "#0d0d30";
+  const capHi = "#2a2a6a";
+  const bootBase = "#2a1a0e";
+  const bootHi = "#3d2b1a";
+  const bootSole = "#0a0a0a";
+  const darkPants = "#14143a";
+  const frontPants = "#1e1e3c";
+
+  const angry = saltMeter > 75;
+  const veryAngry = saltMeter >= 100;
 
   ctx.save();
   if (flipped) {
@@ -1574,21 +1911,25 @@ function drawPlayer(
     ctx.translate(x, y);
   }
 
-  // Power-up glow on body (no outline box)
-  // Glow is applied inline when drawing torso/body below
-
   // Dying animation
   if (state === "dying" && dyingTimer > 0) {
     const progress = (80 - dyingTimer) / 80;
     const spin = progress * Math.PI * 3;
-    const fallOffset = progress * progress * 60;
+    const fallOffset = progress * progress * 70;
     ctx.globalAlpha = 1 - progress * 0.6;
-    // We're already translated to (x,y) or flipped - apply spin around center
     ctx.translate(p.w / 2, p.h / 2 + fallOffset);
     ctx.rotate(spin);
-    const shrink = 1 - progress * 0.4;
+    const shrink = 1 - progress * 0.45;
     ctx.scale(shrink, shrink);
     ctx.translate(-p.w / 2, -p.h / 2);
+    // "!!" exclamation marks when first dying
+    if (dyingTimer > 60) {
+      ctx.save();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 10px monospace";
+      ctx.fillText("!!", -8, -4);
+      ctx.restore();
+    }
   }
 
   // Hit flash
@@ -1596,329 +1937,436 @@ function drawPlayer(
     ctx.globalAlpha = 0.3;
   }
 
-  const angry = saltMeter > 75;
-  const veryAngry = saltMeter >= 100;
-  const skinTone = "#7B4A2D";
-  const skinShade = "#5a3520";
-  const shirtBase = veryAngry ? "#cc2222" : "#d8d8d8";
-  const shirtShade = veryAngry ? "#991a1a" : "#b0b0b0";
-
+  // ============================================================
   if (state === "run") {
     // ===== SIDE PROFILE (facing right) =====
-    // legSwing cycles -10 to +10: positive = front leg forward (more pronounced)
-    const legSwing = Math.sin((frame * Math.PI) / 2) * 13;
-    // Body bob: slight up-down as legs alternate
-    const bodyBob = Math.abs(Math.sin((frame * Math.PI) / 2)) * -1.5;
-    // Arms swing counter to front leg
-    const armSwing = -legSwing * 1.1;
+    const bodyBob = Math.abs(Math.sin((frame * Math.PI) / 2)) * -2;
+    const legSwing = Math.sin((frame * Math.PI) / 2) * 15;
+    const armSwing = -legSwing * 0.9;
 
-    // --- BACK LEG (behind body, darker) ---
-    ctx.fillStyle = "#14143a";
-    ctx.fillRect(7, 20 + legSwing + bodyBob, 8, 12);
-    // back boot
-    ctx.fillStyle = "#1a100a";
-    ctx.fillRect(6, 31 + legSwing + bodyBob, 10, 5);
-    // back boot sole
-    ctx.fillStyle = "#0a0a0a";
-    ctx.fillRect(6, 35 + legSwing + bodyBob, 10, 1);
+    // --- BACK LEG (darker) ---
+    ctx.fillStyle = darkPants;
+    ctx.fillRect(9, 26 + legSwing + bodyBob, 10, 15);
+    ctx.fillStyle = bootBase;
+    ctx.fillRect(8, 40 + legSwing + bodyBob, 12, 6);
+    ctx.fillStyle = bootSole;
+    ctx.fillRect(8, 46 + legSwing + bodyBob, 12, 1);
 
-    // --- BACK ARM (behind body, in shadow - counter swing) ---
-    ctx.fillStyle = skinShade;
-    ctx.fillRect(4, 13 + armSwing + bodyBob, 5, 9);
+    // --- BACK ARM ---
+    ctx.fillStyle = skinShad;
+    ctx.fillRect(6, 17 + armSwing + bodyBob, 6, 11);
 
-    // --- MOTION TRAIL (faint torso ghost behind) ---
-    {
-      const trailDir = facing === -1 ? 2 : -2;
+    // --- MOTION TRAIL ---
+    if (!liteMode) {
+      const trailDir = facing === -1 ? 3 : -3;
       ctx.globalAlpha = 0.15;
       ctx.fillStyle = shirtBase;
-      ctx.fillRect(5 + trailDir, 12 + bodyBob, 14, 10);
+      ctx.fillRect(6 + trailDir, 15 + bodyBob, 18, 13);
       ctx.globalAlpha =
         hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0 ? 0.3 : 1;
     }
 
-    // --- TORSO (side profile, with body bob) ---
+    // --- TORSO ---
     ctx.fillStyle = shirtBase;
-    ctx.fillRect(5, 12 + bodyBob, 14, 10);
-    ctx.fillStyle = shirtShade;
-    ctx.fillRect(5, 19 + bodyBob, 14, 3);
-    ctx.fillStyle = veryAngry ? "#ff4444" : "#f0f0f0";
-    ctx.fillRect(6, 13 + bodyBob, 6, 2); // highlight
+    ctx.fillRect(6, 15 + bodyBob, 18, 13);
+    ctx.fillStyle = shirtShad;
+    ctx.fillRect(6, 24 + bodyBob, 18, 4);
+    ctx.fillStyle = shirtHi;
+    ctx.fillRect(8, 16 + bodyBob, 8, 3);
 
-    // --- FRONT LEG (in front of body) ---
-    ctx.fillStyle = "#1e1e3c";
-    ctx.fillRect(9, 20 - legSwing + bodyBob, 8, 12);
-    // knee highlight
-    ctx.fillStyle = "#2e2e5c";
-    ctx.fillRect(10, 24 - legSwing + bodyBob, 5, 3);
-    // front boot
-    ctx.fillStyle = "#2a1a0e";
-    ctx.fillRect(8, 31 - legSwing + bodyBob, 10, 5);
-    // toe extends forward (right = direction of travel)
-    ctx.fillRect(15, 33 - legSwing + bodyBob, 4, 2);
-    ctx.fillStyle = "#3d2b1a";
-    ctx.fillRect(9, 31 - legSwing + bodyBob, 7, 2);
-    // boot sole (dark rect at toe)
-    ctx.fillStyle = "#0a0a0a";
-    ctx.fillRect(8, 35 - legSwing + bodyBob, 11, 1);
+    // --- FRONT LEG ---
+    ctx.fillStyle = frontPants;
+    ctx.fillRect(11, 26 - legSwing + bodyBob, 10, 15);
+    ctx.fillStyle = pantsHi;
+    ctx.fillRect(12, 30 - legSwing + bodyBob, 7, 4);
+    ctx.fillStyle = bootBase;
+    ctx.fillRect(10, 40 - legSwing + bodyBob, 14, 6);
+    ctx.fillRect(18, 43 - legSwing + bodyBob, 4, 2);
+    ctx.fillStyle = bootHi;
+    ctx.fillRect(11, 40 - legSwing + bodyBob, 9, 3);
+    ctx.fillStyle = bootSole;
+    ctx.fillRect(10, 46 - legSwing + bodyBob, 13, 1);
 
-    // --- FRONT ARM (counter-swings to legs for natural gait) ---
-    ctx.fillStyle = skinTone;
-    ctx.fillRect(14, 13 + armSwing + bodyBob, 5, 9);
-    ctx.fillStyle = skinShade;
-    ctx.fillRect(14, 13 + armSwing + bodyBob, 2, 9);
+    // --- FRONT ARM ---
+    ctx.fillStyle = skinBase;
+    ctx.fillRect(18, 17 + armSwing + bodyBob, 6, 11);
+    ctx.fillStyle = skinShad;
+    ctx.fillRect(18, 17 + armSwing + bodyBob, 2, 11);
 
-    // --- HEAD (side profile) ---
-    ctx.fillStyle = skinTone;
-    ctx.fillRect(6, 2, 14, 11);
-    // ear on back side
-    ctx.fillRect(5, 5, 2, 5);
-    // nose bump on front side
-    ctx.fillStyle = skinShade;
-    ctx.fillRect(19, 7, 2, 2);
+    // --- HEAD (side profile, 14w x 12h) ---
+    ctx.fillStyle = skinBase;
+    ctx.fillRect(8, 2, 16, 13);
+    // ear
+    ctx.fillRect(7, 6, 2, 6);
+    // nose bump
+    ctx.fillStyle = skinShad;
+    ctx.fillRect(23, 9, 2, 3);
     // jaw shading
-    ctx.fillRect(6, 10, 14, 3);
-    ctx.fillRect(6, 2, 2, 9); // back edge shadow
+    ctx.fillRect(8, 12, 16, 3);
+    ctx.fillRect(8, 2, 2, 10);
+    // highlight on forehead
+    ctx.fillStyle = skinHi;
+    ctx.fillRect(10, 3, 5, 3);
 
-    // --- CAP (side profile) ---
-    ctx.fillStyle = "#1a1a3e";
-    ctx.fillRect(5, -1, 15, 5);
-    ctx.fillStyle = "#111130";
-    ctx.fillRect(5, 3, 15, 2);
-    // brim extends forward (right)
-    ctx.fillStyle = "#252550";
-    ctx.fillRect(18, 3, 7, 2);
-    ctx.fillStyle = "#2a2a5a";
-    ctx.fillRect(10, -2, 4, 2);
+    // --- EYE (single, front side) ---
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(18, 6, 4, 3);
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(19, 7, 2, 2);
+    // Brow (determined furrowed: 1px dark bar above eye, inner brow 1px lower)
+    ctx.fillStyle = "#3a2010";
+    ctx.fillRect(17, 5, 5, 1);
+    ctx.fillRect(17, 4, 2, 1); // extra furrowed pixel
 
-    // --- SWEAT DROP when salty ---
-    if (angry) {
-      ctx.fillStyle = "#00ccff";
-      ctx.globalAlpha = 0.8;
-      ctx.fillRect(
-        22,
-        2 + (Math.sin(Date.now() * 0.004) * 0.5 + 0.5) * 2,
-        2,
-        3,
-      );
-      ctx.fillRect(
-        22,
-        4 + (Math.sin(Date.now() * 0.004) * 0.5 + 0.5) * 2,
-        3,
-        2,
-      );
-      ctx.globalAlpha =
-        hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0 ? 0.3 : 1;
+    // --- MOUTH (firm set line) ---
+    if (veryAngry) {
+      ctx.fillStyle = "#1a0a0a";
+      ctx.fillRect(17, 12, 5, 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(17, 12, 1, 2);
+      ctx.fillRect(19, 12, 1, 2);
+    } else {
+      ctx.fillStyle = "#3a1a0a";
+      ctx.fillRect(17, 12, 5, 1);
     }
 
-    // Sweat drops when running (visible from saltMeter > 40)
+    // --- CAP (tilted sideways: brim extends RIGHT) ---
+    ctx.fillStyle = capBody;
+    ctx.fillRect(6, 0, 16, 6);
+    ctx.fillStyle = capBrimSh;
+    ctx.fillRect(6, 4, 16, 2);
+    // Brim extends forward-right
+    ctx.fillStyle = capBody;
+    ctx.fillRect(20, 3, 10, 3);
+    ctx.fillStyle = capBrimSh;
+    ctx.fillRect(20, 5, 10, 1);
+    // Cap highlight
+    ctx.fillStyle = capHi;
+    ctx.fillRect(9, 0, 5, 2);
+    ctx.fillStyle = capHi;
+    ctx.fillRect(12, -1, 2, 1);
+
+    // --- SWEAT DROPS ---
     if (saltMeter > 40) {
       const sweatAlpha = Math.min(1, (saltMeter - 40) / 60);
       ctx.globalAlpha = sweatAlpha * (0.5 + Math.sin(Date.now() * 0.008) * 0.3);
       ctx.fillStyle = "#66ddff";
-      // Drop 1
       ctx.beginPath();
-      ctx.ellipse(22, 3, 2, 3, 0, 0, Math.PI * 2);
+      ctx.ellipse(25, 4, 2, 3, 0, 0, Math.PI * 2);
       ctx.fill();
-      // Drop 2 (slightly behind)
       ctx.globalAlpha = sweatAlpha * 0.6;
       ctx.beginPath();
-      ctx.ellipse(21, 8, 1.5, 2.5, 0.3, 0, Math.PI * 2);
+      ctx.ellipse(24, 10, 1.5, 2.5, 0.3, 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha =
         hitTimer > 0 && Math.floor(hitTimer / 4) % 2 === 0 ? 0.3 : 1;
     }
+  } else if (state === "attacking") {
+    // ============================================================
+    // ATTACKING STATE
+    // ============================================================
+    const isWindup = p.attackTimer > 10;
 
-    // --- EYE (single, on front face side) ---
+    // --- BOOTS ---
+    ctx.fillStyle = bootBase;
+    ctx.fillRect(2, 40, 12, 7);
+    ctx.fillRect(0, 43, 13, 4);
+    ctx.fillRect(17, 40, 12, 7);
+    ctx.fillRect(16, 43, 13, 4);
+    ctx.fillStyle = bootHi;
+    ctx.fillRect(3, 40, 9, 3);
+    ctx.fillRect(18, 40, 9, 3);
+    ctx.fillStyle = bootSole;
+    ctx.fillRect(0, 47, 14, 1);
+    ctx.fillRect(16, 47, 14, 1);
+
+    // --- PANTS ---
+    ctx.fillStyle = pantsBase;
+    ctx.fillRect(3, 27, 11, 15);
+    ctx.fillRect(17, 27, 11, 15);
+    ctx.fillStyle = pantsHi;
+    ctx.fillRect(4, 31, 7, 5);
+    ctx.fillRect(18, 31, 7, 5);
+
+    // --- TORSO ---
+    if (isWindup) {
+      ctx.fillStyle = shirtBase;
+      ctx.fillRect(2, 14, 22, 14);
+      ctx.fillStyle = shirtShad;
+      ctx.fillRect(2, 24, 22, 4);
+      ctx.fillStyle = shirtHi;
+      ctx.fillRect(5, 15, 9, 3);
+    } else {
+      ctx.fillStyle = shirtBase;
+      ctx.fillRect(4, 15, 22, 14);
+      ctx.fillStyle = shirtShad;
+      ctx.fillRect(4, 25, 22, 4);
+      ctx.fillStyle = shirtHi;
+      ctx.fillRect(7, 16, 9, 3);
+    }
+
+    // --- HEAD (front-facing) ---
+    ctx.fillStyle = skinBase;
+    ctx.fillRect(7, 2, 18, 13);
+    ctx.fillRect(5, 5, 2, 7);
+    ctx.fillRect(25, 5, 2, 7);
+    ctx.fillStyle = skinShad;
+    ctx.fillRect(7, 12, 18, 3);
+    ctx.fillStyle = skinHi;
+    ctx.fillRect(9, 3, 7, 3);
+
+    // CAP front-facing tilted
+    ctx.fillStyle = capBody;
+    ctx.fillRect(4, -2, 19, 6);
+    ctx.fillStyle = capBrimSh;
+    ctx.fillRect(4, 3, 19, 2);
+    ctx.fillStyle = capBody;
+    ctx.fillRect(18, 4, 10, 2);
+    ctx.fillStyle = capBrimSh;
+    ctx.fillRect(18, 5, 10, 1);
+    ctx.fillStyle = capHi;
+    ctx.fillRect(7, -2, 6, 2);
+
+    // EYES front-facing determined
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(15, 5, 3, 3);
+    ctx.fillRect(9, 6, 4, 3);
+    ctx.fillRect(19, 6, 4, 3);
     ctx.fillStyle = "#000000";
-    if (angry) {
-      ctx.fillRect(15, 6, 3, 2);
-      ctx.fillStyle = "#4a2a10";
-      ctx.fillRect(14, 4, 5, 1);
-    } else {
-      ctx.fillRect(15, 6, 2, 2);
-      ctx.fillStyle = "#4a2a10";
-      ctx.fillRect(14, 4, 4, 1);
-    }
+    ctx.fillRect(10, 7, 2, 2);
+    ctx.fillRect(20, 7, 2, 2);
+    // Furrowed determined brows
+    ctx.fillStyle = "#3a2010";
+    ctx.fillRect(8, 5, 6, 1);
+    ctx.fillRect(18, 5, 6, 1);
+    ctx.fillRect(12, 6, 3, 1);
+    ctx.fillRect(18, 6, 3, 1);
 
-    // --- MOUTH (profile) ---
-    if (veryAngry) {
-      ctx.fillStyle = "#1a0a0a";
-      ctx.fillRect(14, 10, 4, 2);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(14, 10, 1, 2);
-      ctx.fillRect(16, 10, 1, 2);
-    } else if (angry) {
-      ctx.fillStyle = "#3a1a0a";
-      ctx.fillRect(14, 10, 4, 1);
-      ctx.fillRect(13, 9, 2, 2);
+    // MOUTH gritted during attack
+    ctx.fillStyle = "#1a0a0a";
+    ctx.fillRect(10, 12, 12, 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(10, 12, 2, 2);
+    ctx.fillRect(14, 12, 2, 2);
+    ctx.fillRect(18, 12, 2, 2);
+
+    // NOSE
+    ctx.fillStyle = skinShad;
+    ctx.fillRect(15, 10, 2, 2);
+
+    // ARMS & AXE ATTACK
+    ctx.save();
+    ctx.shadowColor = "#ffd700";
+    ctx.shadowBlur = liteMode ? 0 : 16;
+    if (isWindup) {
+      // Arms raised overhead - scrappy determined windup
+      ctx.fillStyle = skinBase;
+      ctx.fillRect(-4, -6, 6, 16);
+      ctx.fillRect(30, -6, 6, 16);
+      ctx.fillStyle = skinShad;
+      ctx.fillRect(-4, -6, 2, 16);
+      // Axe overhead
+      ctx.fillStyle = "#8B5E3C";
+      ctx.fillRect(28, -18, 4, 18);
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(18, -22, 18, 8);
+      ctx.fillRect(28, -26, 8, 12);
+      ctx.fillStyle = "#cccccc";
+      ctx.fillRect(19, -21, 6, 3);
+      ctx.fillStyle = "#dddddd";
+      ctx.fillRect(29, -25, 3, 4);
     } else {
-      ctx.fillStyle = "#3a1a0a";
-      ctx.fillRect(14, 10, 4, 1);
+      // Arms slammed down-forward
+      ctx.fillStyle = skinBase;
+      ctx.fillRect(-4, 22, 6, 14);
+      ctx.fillRect(30, 22, 6, 14);
+      ctx.fillStyle = skinShad;
+      ctx.fillRect(-4, 22, 2, 14);
+      // Axe slammed down
+      ctx.fillStyle = "#8B5E3C";
+      ctx.fillRect(28, 20, 4, 18);
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(20, 32, 18, 8);
+      ctx.fillRect(28, 28, 8, 12);
+      ctx.fillStyle = "#cccccc";
+      ctx.fillRect(21, 33, 6, 3);
+      ctx.fillStyle = "#dddddd";
+      ctx.fillRect(29, 29, 3, 4);
     }
+    ctx.shadowBlur = 0;
+    ctx.restore();
   } else {
-    // ===== FRONT-FACING (idle, jump, hit, victory) =====
-    // Breathing bob for idle state
-    const idleBob = state === "idle" ? Math.sin(Date.now() * 0.002) * 1 : 0;
-    const jumpLeg = state === "jump" ? -6 : 0;
+    // ============================================================
+    // FRONT-FACING (idle, jump, hit, victory, dying)
+    // ============================================================
+    const idleBob = state === "idle" ? Math.sin(Date.now() * 0.002) * 1.2 : 0;
+    const jumpLeg = state === "jump" ? -8 : 0;
 
     // Wind lines when airborne
     if (state === "jump") {
       ctx.save();
       ctx.globalAlpha = 0.5;
       ctx.fillStyle = "#334466";
-      // 3 short horizontal lines to the left (simulate speed)
-      ctx.fillRect(-14, 8, 8, 1);
-      ctx.fillRect(-12, 12, 10, 1);
-      ctx.fillRect(-10, 16, 7, 1);
+      ctx.fillRect(-16, 10, 10, 1);
+      ctx.fillRect(-14, 15, 12, 1);
+      ctx.fillRect(-12, 20, 8, 1);
       ctx.restore();
     }
 
     // --- BOOTS ---
-    ctx.fillStyle = "#2a1a0e";
-    ctx.fillRect(1, 30, 9, 6);
-    ctx.fillRect(0, 33, 10, 3);
-    ctx.fillRect(13, 30, 9, 6);
-    ctx.fillRect(12, 33, 10, 3);
-    ctx.fillStyle = "#3d2b1a";
-    ctx.fillRect(2, 30, 7, 2);
-    ctx.fillRect(14, 30, 7, 2);
+    ctx.fillStyle = bootBase;
+    ctx.fillRect(2, 40, 12, 7);
+    ctx.fillRect(0, 43, 13, 4);
+    ctx.fillRect(18, 40, 12, 7);
+    ctx.fillRect(16, 43, 13, 4);
+    ctx.fillStyle = bootHi;
+    ctx.fillRect(3, 40, 9, 3);
+    ctx.fillRect(19, 40, 9, 3);
+    ctx.fillStyle = bootSole;
+    ctx.fillRect(0, 47, 14, 1);
+    ctx.fillRect(16, 47, 14, 1);
 
     // --- PANTS ---
-    ctx.fillStyle = "#1e1e3c";
-    ctx.fillRect(2, 20 + jumpLeg, 9, 12);
-    ctx.fillRect(13, 20 + jumpLeg, 9, 12);
-    ctx.fillStyle = "#2e2e5c";
-    ctx.fillRect(3, 24 + jumpLeg, 6, 3);
-    ctx.fillRect(14, 24 + jumpLeg, 6, 3);
+    ctx.fillStyle = pantsBase;
+    ctx.fillRect(3, 27 + jumpLeg, 11, 15);
+    ctx.fillRect(17, 27 + jumpLeg, 11, 15);
+    ctx.fillStyle = pantsHi;
+    ctx.fillRect(4, 31 + jumpLeg, 7, 4);
+    ctx.fillRect(18, 31 + jumpLeg, 7, 4);
 
     // --- T-SHIRT BODY ---
     ctx.fillStyle = shirtBase;
-    ctx.fillRect(1, 12, 22, 10);
-    ctx.fillStyle = shirtShade;
-    ctx.fillRect(1, 19, 22, 3);
-    ctx.fillRect(1, 12, 3, 10);
-    ctx.fillStyle = veryAngry ? "#ff4444" : "#f0f0f0";
-    ctx.fillRect(4, 13, 8, 2);
+    ctx.fillRect(2, 14, 28, 14);
+    ctx.fillStyle = shirtShad;
+    ctx.fillRect(2, 24, 28, 4);
+    ctx.fillRect(2, 14, 3, 14);
+    ctx.fillStyle = shirtHi;
+    ctx.fillRect(5, 15, 10, 3);
 
     // --- ARMS ---
     if (state === "jump") {
-      // Arms raised high for jumping pose
-      ctx.fillStyle = skinTone;
-      ctx.fillRect(-5, 0, 5, 12);
-      ctx.fillRect(24, 0, 5, 12);
-      ctx.fillStyle = skinShade;
-      ctx.fillRect(-5, 0, 2, 12);
-      // Sleeves pulled up when arms raised
+      ctx.fillStyle = skinBase;
+      ctx.fillRect(-6, 0, 7, 14);
+      ctx.fillRect(31, 0, 7, 14);
+      ctx.fillStyle = skinShad;
+      ctx.fillRect(-6, 0, 2, 14);
       ctx.fillStyle = shirtBase;
-      ctx.fillRect(-5, 0, 5, 3);
-      ctx.fillRect(24, 0, 5, 3);
+      ctx.fillRect(-6, 0, 7, 4);
+      ctx.fillRect(31, 0, 7, 4);
     } else if (state === "victory") {
-      ctx.fillStyle = skinTone;
-      ctx.fillRect(-4, 2, 5, 12);
-      ctx.fillRect(23, 2, 5, 12);
+      ctx.fillStyle = skinBase;
+      ctx.fillRect(-5, 2, 6, 14);
+      ctx.fillRect(31, 2, 6, 14);
+      ctx.fillStyle = skinShad;
+      ctx.fillRect(-5, 2, 2, 14);
     } else {
-      ctx.fillStyle = skinTone;
-      ctx.fillRect(-3, 13, 5, 9);
-      ctx.fillRect(22, 13, 5, 9);
-      ctx.fillStyle = skinShade;
-      ctx.fillRect(-3, 13, 2, 9);
+      ctx.fillStyle = skinBase;
+      ctx.fillRect(-4, 15, 6, 11);
+      ctx.fillRect(30, 15, 6, 11);
+      ctx.fillStyle = skinShad;
+      ctx.fillRect(-4, 15, 2, 11);
     }
 
-    // --- HEAD ---
-    ctx.fillStyle = skinTone;
-    ctx.fillRect(3, 2 + idleBob, 18, 12);
-    ctx.fillRect(2, 5, 2, 5);
-    ctx.fillRect(20, 5, 2, 5);
-    ctx.fillStyle = skinShade;
-    ctx.fillRect(3, 11, 18, 3);
-    ctx.fillRect(3, 2, 3, 10);
+    // --- HEAD (front-facing, 18w x 13h) ---
+    ctx.fillStyle = skinBase;
+    ctx.fillRect(7, 2 + idleBob, 18, 13);
+    ctx.fillRect(5, 5 + idleBob, 2, 7);
+    ctx.fillRect(25, 5 + idleBob, 2, 7);
+    ctx.fillStyle = skinShad;
+    ctx.fillRect(7, 12 + idleBob, 18, 3);
+    ctx.fillRect(7, 2 + idleBob, 3, 11);
+    ctx.fillStyle = skinHi;
+    ctx.fillRect(10, 3 + idleBob, 7, 3);
 
-    // --- BASEBALL CAP ---
-    ctx.fillStyle = "#1a1a3e";
-    ctx.fillRect(2, -2 + idleBob, 20, 6);
-    ctx.fillStyle = "#111130";
-    ctx.fillRect(2, 3, 20, 2);
-    ctx.fillStyle = "#252550";
-    ctx.fillRect(14, 4, 9, 2);
-    ctx.fillStyle = "#2a2a5a";
-    ctx.fillRect(10, -3, 4, 2);
+    // --- CAP (front-facing, tilted: brim offset right of center) ---
+    ctx.fillStyle = capBody;
+    ctx.fillRect(5, -2 + idleBob, 19, 6);
+    ctx.fillStyle = capBrimSh;
+    ctx.fillRect(5, 3 + idleBob, 19, 2);
+    ctx.fillStyle = capBody;
+    ctx.fillRect(18, 4 + idleBob, 10, 2);
+    ctx.fillStyle = capBrimSh;
+    ctx.fillRect(18, 5 + idleBob, 10, 1);
+    ctx.fillStyle = capHi;
+    ctx.fillRect(8, -2 + idleBob, 6, 2);
+    ctx.fillStyle = capHi;
+    ctx.fillRect(14, -3 + idleBob, 2, 1);
 
     // --- EYES ---
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(6, 6, 4, 3);
-    ctx.fillRect(14, 6, 4, 3);
+    ctx.fillRect(9, 6 + idleBob, 4, 3);
+    ctx.fillRect(19, 6 + idleBob, 4, 3);
     ctx.fillStyle = "#000000";
     if (angry) {
-      ctx.fillRect(7, 7, 3, 2);
-      ctx.fillRect(15, 7, 3, 2);
-      ctx.fillStyle = "#4a2a10";
-      ctx.fillRect(5, 5, 5, 1);
-      ctx.fillRect(14, 5, 5, 1);
-      ctx.fillRect(5, 5, 1, 1);
-      ctx.fillRect(18, 5, 1, 1);
+      ctx.fillRect(10, 7 + idleBob, 3, 2);
+      ctx.fillRect(20, 7 + idleBob, 3, 2);
     } else {
-      ctx.fillRect(7, 7, 2, 2);
-      ctx.fillRect(15, 7, 2, 2);
+      ctx.fillRect(10, 7 + idleBob, 2, 2);
+      ctx.fillRect(20, 7 + idleBob, 2, 2);
     }
 
-    // --- X EYES during death ---
+    // --- DETERMINED FURROWED BROW ---
+    ctx.fillStyle = "#3a2010";
+    ctx.fillRect(8, 5 + idleBob, 6, 1);
+    ctx.fillRect(18, 5 + idleBob, 6, 1);
+    ctx.fillRect(12, 6 + idleBob, 3, 1);
+    ctx.fillRect(18, 6 + idleBob, 3, 1);
+    if (angry) {
+      ctx.fillRect(12, 7 + idleBob, 2, 1);
+      ctx.fillRect(18, 7 + idleBob, 2, 1);
+    }
+
+    // --- X EYES during dying ---
     if (state === "dying" && dyingTimer > 0) {
       ctx.fillStyle = "#ffffff";
-      ctx.fillRect(6, 6, 4, 3);
-      ctx.fillRect(14, 6, 4, 3);
+      ctx.fillRect(9, 6 + idleBob, 4, 3);
+      ctx.fillRect(19, 6 + idleBob, 4, 3);
       ctx.fillStyle = "#ff2200";
-      // Left X
-      ctx.fillRect(6, 6, 1, 1);
       ctx.fillRect(9, 6, 1, 1);
-      ctx.fillRect(7, 7, 2, 1);
-      ctx.fillRect(6, 8, 1, 1);
+      ctx.fillRect(12, 6, 1, 1);
+      ctx.fillRect(10, 7, 2, 1);
       ctx.fillRect(9, 8, 1, 1);
-      // Right X
-      ctx.fillRect(14, 6, 1, 1);
-      ctx.fillRect(17, 6, 1, 1);
-      ctx.fillRect(15, 7, 2, 1);
-      ctx.fillRect(14, 8, 1, 1);
-      ctx.fillRect(17, 8, 1, 1);
+      ctx.fillRect(12, 8, 1, 1);
+      ctx.fillRect(19, 6, 1, 1);
+      ctx.fillRect(22, 6, 1, 1);
+      ctx.fillRect(20, 7, 2, 1);
+      ctx.fillRect(19, 8, 1, 1);
+      ctx.fillRect(22, 8, 1, 1);
     }
 
     // --- MOUTH / EXPRESSION ---
     if (veryAngry) {
       ctx.fillStyle = "#1a0a0a";
-      ctx.fillRect(8, 11, 8, 2);
+      ctx.fillRect(10, 12 + idleBob, 12, 2);
       ctx.fillStyle = "#ffffff";
-      ctx.fillRect(8, 11, 2, 2);
-      ctx.fillRect(11, 11, 2, 2);
-      ctx.fillRect(14, 11, 2, 2);
+      ctx.fillRect(10, 12 + idleBob, 2, 2);
+      ctx.fillRect(14, 12 + idleBob, 2, 2);
+      ctx.fillRect(18, 12 + idleBob, 2, 2);
     } else if (angry) {
       ctx.fillStyle = "#3a1a0a";
-      ctx.fillRect(8, 11, 8, 1);
-      ctx.fillRect(7, 10, 2, 2);
-      ctx.fillRect(15, 10, 2, 2);
+      ctx.fillRect(10, 12 + idleBob, 12, 1);
+      ctx.fillRect(9, 11 + idleBob, 3, 2);
+      ctx.fillRect(20, 11 + idleBob, 3, 2);
     } else {
       ctx.fillStyle = "#3a1a0a";
-      ctx.fillRect(8, 11, 8, 1);
+      ctx.fillRect(10, 12 + idleBob, 12, 1);
     }
 
     // --- NOSE ---
-    ctx.fillStyle = skinShade;
-    ctx.fillRect(11, 9, 2, 2);
+    ctx.fillStyle = skinShad;
+    ctx.fillRect(15, 10 + idleBob, 2, 2);
 
-    // --- SWEAT DROPS (front-facing, idle/jump) ---
+    // --- SWEAT DROPS (front-facing) ---
     if (saltMeter > 50) {
       const sweatAlpha = Math.min(1, (saltMeter - 50) / 50);
       ctx.globalAlpha = sweatAlpha * (0.6 + Math.sin(Date.now() * 0.006) * 0.3);
       ctx.fillStyle = "#55ddff";
-      // Drop on left forehead
       ctx.beginPath();
-      ctx.ellipse(8, 4 + idleBob, 1.5, 2.5, 0.2, 0, Math.PI * 2);
+      ctx.ellipse(10, 5 + idleBob, 1.5, 2.5, 0.2, 0, Math.PI * 2);
       ctx.fill();
       if (saltMeter > 70) {
-        // Second drop on right side when more salty
         ctx.globalAlpha = sweatAlpha * 0.7;
         ctx.beginPath();
-        ctx.ellipse(16, 3 + idleBob, 1.5, 2.5, -0.2, 0, Math.PI * 2);
+        ctx.ellipse(22, 4 + idleBob, 1.5, 2.5, -0.2, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.globalAlpha =
@@ -1926,74 +2374,40 @@ function drawPlayer(
     }
   }
 
-  if (state === "attacking") {
-    const isWindup = p.attackTimer > 10;
-    ctx.save();
-    ctx.shadowColor = "#ffd700";
-    ctx.shadowBlur = 14;
-    if (isWindup) {
-      // Arms raised overhead
-      ctx.fillStyle = "#c8a87a";
-      ctx.fillRect(-4, -4, 5, 14);
-      ctx.fillRect(23, -4, 5, 14);
-      // Axe raised above head
-      ctx.fillStyle = "#8B5E3C";
-      ctx.fillRect(22, -14, 3, 14);
-      ctx.fillStyle = "#aaaaaa";
-      ctx.fillRect(14, -16, 14, 7);
-      ctx.fillRect(22, -20, 6, 10);
-      ctx.fillStyle = "#cccccc";
-      ctx.fillRect(15, -15, 5, 3);
-      ctx.fillStyle = "#dddddd";
-      ctx.fillRect(23, -19, 2, 3);
-    } else {
-      // Arms slammed down
-      ctx.fillStyle = "#c8a87a";
-      ctx.fillRect(-4, 16, 5, 12);
-      ctx.fillRect(23, 16, 5, 12);
-      // Axe slammed down
-      ctx.fillStyle = "#8B5E3C";
-      ctx.fillRect(22, 14, 3, 14);
-      ctx.fillStyle = "#aaaaaa";
-      ctx.fillRect(16, 24, 14, 7);
-      ctx.fillRect(22, 20, 6, 10);
-      ctx.fillStyle = "#cccccc";
-      ctx.fillRect(17, 25, 5, 3);
-      ctx.fillStyle = "#dddddd";
-      ctx.fillRect(23, 21, 2, 3);
-    }
-    ctx.shadowBlur = 0;
-    ctx.restore();
-  } else if (hasAxe) {
+  // ============================================================
+  // WEAPON OVERLAYS
+  // ============================================================
+
+  // --- PICKAXE (when held, not attacking) ---
+  if (hasAxe && state !== "attacking") {
     const shouldShowAxe = axeTimer > 120 || Math.floor(axeTimer / 10) % 2 === 0;
     if (shouldShowAxe) {
       ctx.save();
       ctx.shadowColor = "#ffd700";
-      ctx.shadowBlur = 8;
+      ctx.shadowBlur = liteMode ? 0 : 8;
       if (state === "run") {
         ctx.fillStyle = "#8B5E3C";
-        ctx.fillRect(17, 10, 3, 10);
+        ctx.fillRect(22, 12, 3, 14);
         ctx.fillStyle = "#aaaaaa";
-        ctx.fillRect(18, 3, 10, 7);
-        ctx.fillRect(22, 1, 6, 10);
+        ctx.fillRect(22, 3, 12, 8);
+        ctx.fillRect(26, 0, 8, 12);
         ctx.fillStyle = "#cccccc";
-        ctx.fillRect(19, 3, 4, 3);
+        ctx.fillRect(23, 3, 5, 3);
       } else {
         ctx.fillStyle = "#8B5E3C";
-        ctx.fillRect(22, 5, 3, 12);
+        ctx.fillRect(26, 6, 3, 14);
         ctx.fillStyle = "#aaaaaa";
-        ctx.fillRect(16, -2, 14, 8);
-        ctx.fillRect(22, -5, 6, 10);
+        ctx.fillRect(18, -2, 16, 9);
+        ctx.fillRect(26, -6, 8, 12);
         ctx.fillStyle = "#cccccc";
-        ctx.fillRect(17, -1, 5, 3);
+        ctx.fillRect(19, -1, 6, 3);
       }
       ctx.shadowBlur = 0;
       ctx.restore();
     }
-    // fall through to outer ctx.restore() below - stack always balanced
   }
 
-  // --- GUN in hand when carrying gun power-up ---
+  // --- GUN in hand ---
   if (hasGun && p.state !== "dying" && p.state !== "attacking") {
     const gunFlash = gunTimer < 120 && Math.floor(gunTimer / 8) % 2 === 0;
     if (!gunFlash) {
@@ -2002,34 +2416,157 @@ function drawPlayer(
       if (shouldShowGun) {
         ctx.save();
         ctx.shadowColor = "#00aaff";
-        ctx.shadowBlur = gunTimer < 120 ? 10 : 5;
-        // Gun at right side in facing direction (already translated + flipped by ctx)
-        const gx = p.state === "run" ? 17 : 22;
-        const gy = p.state === "run" ? 18 : 16;
-        // Gun body (grey rectangle)
+        ctx.shadowBlur = liteMode ? 0 : gunTimer < 120 ? 10 : 5;
+        const gx = p.state === "run" ? 20 : 26;
+        const gy = p.state === "run" ? 24 : 20;
         ctx.fillStyle = "#888888";
-        ctx.fillRect(gx, gy, 14, 6);
-        // Barrel (slightly darker, extends forward)
+        ctx.fillRect(gx, gy, 16, 7);
         ctx.fillStyle = "#555555";
-        ctx.fillRect(gx + 10, gy + 1, 8, 4);
-        // Trigger guard
+        ctx.fillRect(gx + 12, gy + 1, 10, 5);
         ctx.fillStyle = "#666666";
-        ctx.fillRect(gx + 4, gy + 5, 3, 4);
-        // Handle (wood brown)
+        ctx.fillRect(gx + 5, gy + 6, 3, 5);
         ctx.fillStyle = "#6B3A1F";
-        ctx.fillRect(gx + 2, gy + 5, 7, 6);
+        ctx.fillRect(gx + 2, gy + 6, 8, 7);
         ctx.fillStyle = "#8B4513";
-        ctx.fillRect(gx + 3, gy + 5, 3, 2);
-        // Muzzle flash hint
+        ctx.fillRect(gx + 3, gy + 6, 4, 3);
         ctx.fillStyle = "#cccccc";
-        ctx.fillRect(gx + 17, gy + 2, 2, 2);
+        ctx.fillRect(gx + 19, gy + 2, 3, 3);
         ctx.shadowBlur = 0;
         ctx.restore();
       }
     }
   }
 
+  // --- HARD HAT ---
+  if (currentWeapon === "hardhat" && p.state !== "dying") {
+    ctx.save();
+    ctx.shadowColor = "#ffee00";
+    ctx.shadowBlur = liteMode ? 0 : 6;
+    ctx.fillStyle = "#ffdd00";
+    ctx.fillRect(-1, -7, p.w + 2, 3);
+    ctx.fillStyle = "#ffcc00";
+    ctx.fillRect(3, -14, p.w - 6, 9);
+    ctx.fillStyle = "#ffe44a";
+    ctx.fillRect(5, -13, p.w - 12, 4);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // --- DYNAMITE ---
+  if (currentWeapon === "dynamite" && p.state !== "dying") {
+    ctx.save();
+    ctx.shadowColor = "#ff4400";
+    ctx.shadowBlur = liteMode ? 0 : 6;
+    ctx.fillStyle = "#cc2200";
+    ctx.fillRect(22, 18, 8, 16);
+    ctx.fillStyle = "#ff4400";
+    ctx.fillRect(23, 19, 6, 14);
+    ctx.strokeStyle = "#888800";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(26, 18);
+    ctx.lineTo(28, 12);
+    ctx.lineTo(30, 10);
+    ctx.stroke();
+    ctx.shadowColor = "#ffff00";
+    ctx.shadowBlur = liteMode ? 0 : 8;
+    ctx.fillStyle = "#ffff00";
+    ctx.fillRect(29, 9, 3, 3);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // --- SALT SHAKER ---
+  if (currentWeapon === "saltshaker" && p.state !== "dying") {
+    ctx.save();
+    ctx.shadowColor = "#88ddff";
+    ctx.shadowBlur = liteMode ? 0 : 6;
+    ctx.fillStyle = "#dddddd";
+    ctx.fillRect(20, 16, 9, 15);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(21, 17, 6, 13);
+    ctx.fillStyle = "#aaaaaa";
+    ctx.fillRect(20, 14, 9, 3);
+    ctx.fillStyle = "#888888";
+    ctx.fillRect(22, 18, 1, 1);
+    ctx.fillRect(24, 18, 1, 1);
+    ctx.fillRect(26, 18, 1, 1);
+    ctx.fillRect(23, 21, 1, 1);
+    ctx.fillRect(25, 21, 1, 1);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // --- SPEED BOOTS foot trails ---
+  if (speedBootsTimer > 0 && p.state === "run") {
+    const bootFlash =
+      speedBootsTimer < 120 && Math.floor(speedBootsTimer / 8) % 2 === 0;
+    if (!bootFlash) {
+      ctx.save();
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = "#ff9900";
+      for (let li = 0; li < 3; li++) {
+        const lineX = -(li + 1) * 6;
+        ctx.fillRect(lineX + 5, p.h - 5, 8 - li, 2);
+        ctx.fillRect(lineX + 17, p.h - 5, 8 - li, 2);
+      }
+      ctx.restore();
+    }
+  }
+
+  // --- MAGNET aura ---
+  if (magnetTimer > 0 && p.state !== "dying") {
+    const magFlash = magnetTimer < 120 && Math.floor(magnetTimer / 8) % 2 === 0;
+    if (!magFlash) {
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.shadowColor = "#cc44ff";
+      ctx.shadowBlur = liteMode ? 0 : 14;
+      ctx.strokeStyle = "#cc44ff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.w / 2, p.h / 2, p.w, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // --- PORTFOLIO SHIELD gold outline ---
+  if (portfolioShieldTimer > 0 && p.state !== "dying") {
+    const shieldFlash =
+      portfolioShieldTimer < 120 &&
+      Math.floor(portfolioShieldTimer / 8) % 2 === 0;
+    if (!shieldFlash) {
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      ctx.strokeStyle = "#ffd700";
+      ctx.lineWidth = 2;
+      ctx.shadowColor = "#ffd700";
+      ctx.shadowBlur = liteMode ? 0 : 8;
+      ctx.strokeRect(-2, -2, p.w + 4, p.h + 4);
+      ctx.restore();
+    }
+  }
+
   ctx.restore();
+
+  // --- BUBBLE (drawn after outer restore so it's in canvas coords) ---
+  if (hasBubble && p.state !== "dying") {
+    const bubbleAlpha = 0.25 + Math.sin(Date.now() * 0.006) * 0.1;
+    ctx.save();
+    ctx.globalAlpha = bubbleAlpha;
+    ctx.shadowColor = "#88ddff";
+    ctx.shadowBlur = liteMode ? 0 : 16;
+    ctx.strokeStyle = "#aaeeff";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(p.x + p.w / 2, p.y + p.h / 2, 28, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = bubbleAlpha * 0.3;
+    ctx.fillStyle = "#88ddff";
+    ctx.fill();
+    ctx.restore();
+  }
 }
 function drawBear(
   ctx: CanvasRenderingContext2D,
@@ -2342,6 +2879,9 @@ function drawBear(
 }
 
 function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
+  // Frost tint for slowed hazards
+  const isSlowed = h.slowTimer && h.slowTimer > 0;
+
   ctx.save();
   ctx.translate(h.x + h.w / 2, h.y + h.h / 2);
   ctx.rotate(h.rotation);
@@ -2767,6 +3307,15 @@ function drawHazard(ctx: CanvasRenderingContext2D, h: Hazard) {
       }
       break;
     }
+  }
+  // Frost overlay when slowed
+  if (isSlowed) {
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = "#aaddff";
+    ctx.fillRect(h.x, h.y, h.w, h.h);
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
   ctx.restore();
 }
@@ -3237,10 +3786,334 @@ function drawGunPickup(
   ctx.restore();
 }
 
+function drawDynamitePickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.08) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#ff4400";
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = "#cc2200";
+  ctx.fillRect(4, 2, 8, 16);
+  ctx.fillStyle = "#ff4400";
+  ctx.fillRect(5, 3, 6, 14);
+  // Fuse
+  ctx.strokeStyle = "#888800";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(8, 2);
+  ctx.lineTo(10, -3);
+  ctx.lineTo(13, -6);
+  ctx.stroke();
+  // Fuse spark
+  ctx.shadowColor = "#ffff00";
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = "#ffff00";
+  ctx.fillRect(12, -7, 2, 2);
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#ff6600";
+  ctx.textAlign = "center";
+  ctx.fillText("BOOM", 8, 24);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawSaltShakerPickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.09) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#88ddff";
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = "#dddddd";
+  ctx.fillRect(3, 4, 10, 16);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(4, 5, 7, 14);
+  // Cap
+  ctx.fillStyle = "#aaaaaa";
+  ctx.fillRect(3, 2, 10, 4);
+  // Holes
+  ctx.fillStyle = "#888888";
+  ctx.fillRect(5, 7, 2, 2);
+  ctx.fillRect(9, 7, 2, 2);
+  ctx.fillRect(7, 10, 2, 2);
+  ctx.fillRect(5, 13, 2, 2);
+  ctx.fillRect(9, 13, 2, 2);
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#88ddff";
+  ctx.textAlign = "center";
+  ctx.fillText("SALT", 8, 26);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawHardHatPickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.07) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#ffdd00";
+  ctx.shadowBlur = 12;
+  // Brim
+  ctx.fillStyle = "#ffcc00";
+  ctx.fillRect(0, 10, 18, 4);
+  // Dome
+  ctx.fillStyle = "#ffdd00";
+  ctx.fillRect(2, 2, 14, 10);
+  ctx.fillRect(3, 0, 12, 4);
+  ctx.fillStyle = "#ffe44a";
+  ctx.fillRect(3, 2, 8, 4);
+  // Stripe
+  ctx.fillStyle = "#cc9900";
+  ctx.fillRect(7, 2, 2, 10);
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#ffdd00";
+  ctx.textAlign = "center";
+  ctx.fillText("SAFE", 9, 22);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawBubblePickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.1) * 3;
+  const pulse = 1 + Math.sin(frame * 0.15) * 0.1;
+  ctx.save();
+  ctx.translate(x + 9, y + 9 + bob);
+  ctx.scale(pulse, pulse);
+  ctx.shadowColor = "#88ddff";
+  ctx.shadowBlur = 14;
+  ctx.globalAlpha = 0.7;
+  ctx.strokeStyle = "#aaeeff";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, 9, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 0.2;
+  ctx.fillStyle = "#88ddff";
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+  ctx.restore();
+  ctx.save();
+  ctx.shadowColor = "#88ddff";
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#88ddff";
+  ctx.textAlign = "center";
+  ctx.fillText("SHIELD", x + 9, y + 24);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawSpeedBootsPickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.1) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#ff9900";
+  ctx.shadowBlur = 12;
+  // Boot shape (left)
+  ctx.fillStyle = "#ff6600";
+  ctx.fillRect(1, 6, 8, 10);
+  ctx.fillStyle = "#ff8800";
+  ctx.fillRect(2, 7, 6, 8);
+  // Sole
+  ctx.fillStyle = "#cc4400";
+  ctx.fillRect(0, 14, 10, 3);
+  ctx.fillRect(7, 12, 4, 2);
+  // Motion lines
+  ctx.fillStyle = "#ffcc00";
+  for (let li = 0; li < 3; li++) {
+    ctx.fillRect(11 + li * 2, 9 + li, 4 - li, 2);
+  }
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#ff9900";
+  ctx.textAlign = "center";
+  ctx.fillText("FAST", 9, 24);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawMagnetPickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.08) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#cc44ff";
+  ctx.shadowBlur = 12;
+  // Horseshoe shape
+  ctx.strokeStyle = "#cc44ff";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(9, 8, 7, Math.PI, 0, false);
+  ctx.stroke();
+  // Tips
+  ctx.fillStyle = "#ff4444";
+  ctx.fillRect(2, 8, 4, 6);
+  ctx.fillStyle = "#4444ff";
+  ctx.fillRect(12, 8, 4, 6);
+  ctx.fillStyle = "#cc44ff";
+  ctx.fillRect(3, 9, 2, 4);
+  ctx.fillRect(13, 9, 2, 4);
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 5px monospace";
+  ctx.fillStyle = "#cc44ff";
+  ctx.textAlign = "center";
+  ctx.fillText("PULL", 9, 22);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawPortfolioShieldPickup(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  frame: number,
+) {
+  const bob = Math.sin(frame * 0.09) * 3;
+  ctx.save();
+  ctx.translate(x, y + bob);
+  ctx.shadowColor = "#ffd700";
+  ctx.shadowBlur = 14;
+  // Shield shape
+  ctx.fillStyle = "#ffd700";
+  ctx.fillRect(2, 0, 14, 12);
+  ctx.fillRect(0, 2, 18, 8);
+  // Bottom triangle
+  ctx.beginPath();
+  ctx.moveTo(2, 10);
+  ctx.lineTo(16, 10);
+  ctx.lineTo(9, 18);
+  ctx.closePath();
+  ctx.fill();
+  // Inner highlight
+  ctx.fillStyle = "#fffaaa";
+  ctx.fillRect(5, 3, 8, 5);
+  // Dollar sign
+  ctx.fillStyle = "#cc9900";
+  ctx.font = "bold 8px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("$", 9, 12);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 6;
+  ctx.font = "bold 4px monospace";
+  ctx.fillStyle = "#ffd700";
+  ctx.textAlign = "center";
+  ctx.fillText("SHIELD", 9, 24);
+  ctx.textAlign = "left";
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawSpawnedPickup(
+  ctx: CanvasRenderingContext2D,
+  sp: SpawnedPickup,
+  frame: number,
+) {
+  const flash = sp.lifetime < 120 && Math.floor(sp.lifetime / 8) % 2 === 0;
+  if (flash) return;
+  switch (sp.type) {
+    case "pickaxe":
+      drawAxePickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "gun":
+      drawGunPickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "dynamite":
+      drawDynamitePickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "saltshaker":
+      drawSaltShakerPickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "hardhat":
+      drawHardHatPickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "bubble":
+      drawBubblePickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "speedboots":
+      drawSpeedBootsPickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "magnet":
+      drawMagnetPickup(ctx, sp.x, sp.y, frame);
+      break;
+    case "portfolioshield":
+      drawPortfolioShieldPickup(ctx, sp.x, sp.y, frame);
+      break;
+  }
+}
+
+function drawDynamiteInFlight(
+  ctx: CanvasRenderingContext2D,
+  dyn: Dynamite,
+  frame: number,
+) {
+  ctx.save();
+  ctx.translate(dyn.x, dyn.y);
+  const spin = (frame * 0.2) % (Math.PI * 2);
+  ctx.rotate(spin);
+  ctx.shadowColor = "#ff4400";
+  ctx.shadowBlur = 10;
+  // Blink when about to explode
+  if (dyn.timer < 30 && Math.floor(dyn.timer / 4) % 2 === 0) {
+    ctx.fillStyle = "#ffff00";
+  } else {
+    ctx.fillStyle = "#cc2200";
+  }
+  ctx.fillRect(-4, -8, 8, 16);
+  ctx.fillStyle = dyn.timer < 30 ? "#ff8800" : "#ff4400";
+  ctx.fillRect(-3, -7, 6, 14);
+  // Fuse
+  ctx.strokeStyle = "#888800";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, -8);
+  ctx.lineTo(2, -12);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
 function drawBackground(
   ctx: CanvasRenderingContext2D,
   level: number,
   frame: number,
+  liteMode = false,
 ) {
   const palette = LEVEL_PALETTES[level % LEVEL_PALETTES.length];
   // === LAYER 1: Deep background - stone block grid ===
@@ -3338,90 +4211,96 @@ function drawBackground(
   }
 
   // === ANIMATED STALACTITE DRIPS (deterministic via frameCount) ===
-  stalactiteData.forEach((st, idx) => {
-    const dripPhase = (frame + idx * 37) % 180;
-    if (dripPhase < 20) {
-      const dripY = st.h + dripPhase * 0.8;
-      ctx.save();
-      ctx.globalAlpha = 0.7 * (1 - dripPhase / 20);
-      ctx.fillStyle = "#5090c0";
-      ctx.fillRect(st.x + st.w / 2 - 1, dripY, 2, 3);
-      ctx.restore();
-    }
-  });
-
-  // === ORE VEINS: glowing diagonal streaks ===
-  const oreVeins = [
-    { x: 20, y: 150, len: 60, color: "#00ff88", angle: 0.7 },
-    { x: 430, y: 200, len: 50, color: "#4fc3f7", angle: -0.6 },
-    { x: 100, y: 380, len: 45, color: "#ffd700", angle: 0.5 },
-    { x: 360, y: 420, len: 55, color: "#00ff88", angle: -0.8 },
-    { x: 60, y: 550, len: 40, color: "#ff88ff", angle: 0.6 },
-    { x: 400, y: 560, len: 48, color: "#4fc3f7", angle: -0.5 },
-  ];
-  for (const vein of oreVeins) {
-    const glowPulse = 0.4 + Math.sin(frame * 0.035 + vein.x * 0.1) * 0.25;
-    ctx.save();
-    ctx.shadowColor = vein.color;
-    ctx.shadowBlur = (4 + Math.sin(frame * 0.05) * 3) * glowPulse;
-    ctx.strokeStyle = vein.color;
-    ctx.globalAlpha = glowPulse;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(vein.x, vein.y);
-    ctx.lineTo(
-      vein.x + Math.cos(vein.angle) * vein.len,
-      vein.y + Math.sin(vein.angle) * vein.len,
-    );
-    ctx.stroke();
-    // Thinner bright inner line
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "#ffffff";
-    ctx.globalAlpha = glowPulse * 0.4;
-    ctx.beginPath();
-    ctx.moveTo(vein.x, vein.y);
-    ctx.lineTo(
-      vein.x + Math.cos(vein.angle) * vein.len * 0.6,
-      vein.y + Math.sin(vein.angle) * vein.len * 0.6,
-    );
-    ctx.stroke();
-    ctx.restore();
+  if (!liteMode) {
+    stalactiteData.forEach((st, idx) => {
+      const dripPhase = (frame + idx * 37) % 180;
+      if (dripPhase < 20) {
+        const dripY = st.h + dripPhase * 0.8;
+        ctx.save();
+        ctx.globalAlpha = 0.7 * (1 - dripPhase / 20);
+        ctx.fillStyle = "#5090c0";
+        ctx.fillRect(st.x + st.w / 2 - 1, dripY, 2, 3);
+        ctx.restore();
+      }
+    });
   }
 
+  // === ORE VEINS: glowing diagonal streaks ===
+  if (!liteMode) {
+    const oreVeins = [
+      { x: 20, y: 150, len: 60, color: "#00ff88", angle: 0.7 },
+      { x: 430, y: 200, len: 50, color: "#4fc3f7", angle: -0.6 },
+      { x: 100, y: 380, len: 45, color: "#ffd700", angle: 0.5 },
+      { x: 360, y: 420, len: 55, color: "#00ff88", angle: -0.8 },
+      { x: 60, y: 550, len: 40, color: "#ff88ff", angle: 0.6 },
+      { x: 400, y: 560, len: 48, color: "#4fc3f7", angle: -0.5 },
+    ];
+    for (const vein of oreVeins) {
+      const glowPulse = 0.4 + Math.sin(frame * 0.035 + vein.x * 0.1) * 0.25;
+      ctx.save();
+      ctx.shadowColor = vein.color;
+      ctx.shadowBlur = (4 + Math.sin(frame * 0.05) * 3) * glowPulse;
+      ctx.strokeStyle = vein.color;
+      ctx.globalAlpha = glowPulse;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(vein.x, vein.y);
+      ctx.lineTo(
+        vein.x + Math.cos(vein.angle) * vein.len,
+        vein.y + Math.sin(vein.angle) * vein.len,
+      );
+      ctx.stroke();
+      // Thinner bright inner line
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "#ffffff";
+      ctx.globalAlpha = glowPulse * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(vein.x, vein.y);
+      ctx.lineTo(
+        vein.x + Math.cos(vein.angle) * vein.len * 0.6,
+        vein.y + Math.sin(vein.angle) * vein.len * 0.6,
+      );
+      ctx.stroke();
+      ctx.restore();
+    }
+  } // end !liteMode ore veins
+
   // === TORCHLIGHT: flickering orange glow at 2 wall positions ===
-  const torchPositions = [
-    { x: 28, y: 180 },
-    { x: 452, y: 350 },
-  ];
-  for (const torch of torchPositions) {
-    const flicker = 0.7 + Math.sin(Date.now() * 0.008 + torch.x) * 0.3;
-    const flickerFast = Math.sin(Date.now() * 0.022 + torch.x * 2) * 0.15;
-    const totalFlicker = flicker + flickerFast;
-    // Torch glow
-    ctx.save();
-    ctx.shadowColor = "#ff8800";
-    ctx.shadowBlur = 22 * totalFlicker;
-    ctx.fillStyle = `rgba(255,140,0,${0.12 * totalFlicker})`;
-    ctx.beginPath();
-    ctx.arc(torch.x, torch.y, 30 * totalFlicker, 0, Math.PI * 2);
-    ctx.fill();
-    // Torch bracket
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "#555";
-    ctx.fillRect(torch.x - 3, torch.y - 5, 6, 14);
-    // Flame
-    ctx.shadowColor = "#ffdd00";
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = "#ffdd00";
-    ctx.fillRect(
-      torch.x - 3,
-      torch.y - 10 - totalFlicker * 3,
-      6,
-      6 + totalFlicker * 2,
-    );
-    ctx.fillStyle = "#ff6600";
-    ctx.fillRect(torch.x - 2, torch.y - 8 - totalFlicker * 2, 4, 4);
-    ctx.restore();
+  if (!liteMode) {
+    const torchPositions = [
+      { x: 28, y: 180 },
+      { x: 452, y: 350 },
+    ];
+    for (const torch of torchPositions) {
+      const flicker = 0.7 + Math.sin(Date.now() * 0.008 + torch.x) * 0.3;
+      const flickerFast = Math.sin(Date.now() * 0.022 + torch.x * 2) * 0.15;
+      const totalFlicker = flicker + flickerFast;
+      // Torch glow
+      ctx.save();
+      ctx.shadowColor = "#ff8800";
+      ctx.shadowBlur = 22 * totalFlicker;
+      ctx.fillStyle = `rgba(255,140,0,${0.12 * totalFlicker})`;
+      ctx.beginPath();
+      ctx.arc(torch.x, torch.y, 30 * totalFlicker, 0, Math.PI * 2);
+      ctx.fill();
+      // Torch bracket
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#555";
+      ctx.fillRect(torch.x - 3, torch.y - 5, 6, 14);
+      // Flame
+      ctx.shadowColor = "#ffdd00";
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = "#ffdd00";
+      ctx.fillRect(
+        torch.x - 3,
+        torch.y - 10 - totalFlicker * 3,
+        6,
+        6 + totalFlicker * 2,
+      );
+      ctx.fillStyle = "#ff6600";
+      ctx.fillRect(torch.x - 2, torch.y - 8 - totalFlicker * 2, 4, 4);
+      ctx.restore();
+    }
   }
 
   // === LAYER 2: Mine supports - beams, chains, rails ===
@@ -3503,50 +4382,54 @@ function drawBackground(
     { x: 240, y: 60 },
   ];
 
-  for (const cc of crystalClusters) {
-    const glowAnim = 0.4 + Math.sin(frame * 0.04 + cc.x * 0.1) * 0.2;
-    // Crystal glow halo
-    ctx.save();
-    ctx.shadowColor = "#4fc3f7";
-    ctx.shadowBlur = 8 * glowAnim;
-    ctx.globalAlpha = glowAnim * 0.5;
-    ctx.fillStyle = "#4fc3f7";
-    ctx.fillRect(cc.x - 3, cc.y - 6, 10, 14);
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
+  if (!liteMode) {
+    for (const cc of crystalClusters) {
+      const glowAnim = 0.4 + Math.sin(frame * 0.04 + cc.x * 0.1) * 0.2;
+      // Crystal glow halo
+      ctx.save();
+      ctx.shadowColor = "#4fc3f7";
+      ctx.shadowBlur = 8 * glowAnim;
+      ctx.globalAlpha = glowAnim * 0.5;
+      ctx.fillStyle = "#4fc3f7";
+      ctx.fillRect(cc.x - 3, cc.y - 6, 10, 14);
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
 
-    // Crystal diamonds (upward pointing)
-    ctx.fillStyle = "#c8e8f0";
-    // Large center crystal
-    ctx.fillRect(cc.x + 2, cc.y - 8, 3, 10);
-    ctx.fillRect(cc.x, cc.y - 6, 7, 6);
-    // Left smaller crystal
-    ctx.fillRect(cc.x - 1, cc.y - 5, 2, 7);
-    ctx.fillRect(cc.x - 2, cc.y - 3, 4, 4);
-    // Right smaller crystal
-    ctx.fillRect(cc.x + 6, cc.y - 4, 2, 6);
-    ctx.fillRect(cc.x + 5, cc.y - 2, 4, 3);
-    // Inner glow fill
-    ctx.fillStyle = "rgba(79,195,247,0.4)";
-    ctx.fillRect(cc.x + 3, cc.y - 6, 1, 6);
-    ctx.fillRect(cc.x, cc.y - 4, 2, 3);
-    ctx.restore();
-  }
+      // Crystal diamonds (upward pointing)
+      ctx.fillStyle = "#c8e8f0";
+      // Large center crystal
+      ctx.fillRect(cc.x + 2, cc.y - 8, 3, 10);
+      ctx.fillRect(cc.x, cc.y - 6, 7, 6);
+      // Left smaller crystal
+      ctx.fillRect(cc.x - 1, cc.y - 5, 2, 7);
+      ctx.fillRect(cc.x - 2, cc.y - 3, 4, 4);
+      // Right smaller crystal
+      ctx.fillRect(cc.x + 6, cc.y - 4, 2, 6);
+      ctx.fillRect(cc.x + 5, cc.y - 2, 4, 3);
+      // Inner glow fill
+      ctx.fillStyle = "rgba(79,195,247,0.4)";
+      ctx.fillRect(cc.x + 3, cc.y - 6, 1, 6);
+      ctx.fillRect(cc.x, cc.y - 4, 2, 3);
+      ctx.restore();
+    }
+  } // end !liteMode crystal clusters
 
-  // Glowing blue energy wisps near bottom
-  const wispCount = 5;
-  for (let wi = 0; wi < wispCount; wi++) {
-    const wx = 60 + wi * 90 + Math.sin(frame * 0.03 + wi * 1.2) * 20;
-    const wy = CANVAS_H - 30 + Math.cos(frame * 0.05 + wi * 0.8) * 8;
-    const wAlpha = 0.3 + Math.sin(frame * 0.06 + wi) * 0.2;
-    ctx.save();
-    ctx.shadowColor = "#4fc3f7";
-    ctx.shadowBlur = 12;
-    ctx.globalAlpha = wAlpha;
-    ctx.fillStyle = "#4fc3f7";
-    ctx.fillRect(wx - 2, wy - 4, 4, 8);
-    ctx.fillRect(wx - 4, wy - 2, 8, 4);
-    ctx.restore();
+  // Glowing blue energy wisps near bottom (liteMode skip)
+  if (!liteMode) {
+    const wispCount = 5;
+    for (let wi = 0; wi < wispCount; wi++) {
+      const wx = 60 + wi * 90 + Math.sin(frame * 0.03 + wi * 1.2) * 20;
+      const wy = CANVAS_H - 30 + Math.cos(frame * 0.05 + wi * 0.8) * 8;
+      const wAlpha = 0.3 + Math.sin(frame * 0.06 + wi) * 0.2;
+      ctx.save();
+      ctx.shadowColor = "#4fc3f7";
+      ctx.shadowBlur = 12;
+      ctx.globalAlpha = wAlpha;
+      ctx.fillStyle = "#4fc3f7";
+      ctx.fillRect(wx - 2, wy - 4, 4, 8);
+      ctx.fillRect(wx - 4, wy - 2, 8, 4);
+      ctx.restore();
+    }
   }
 
   // === ATMOSPHERIC: Vignette + scanlines + ambient ===
@@ -3776,86 +4659,151 @@ function _drawHUD(ctx: CanvasRenderingContext2D, gs: GameState) {
   ctx.fillText("SALT", barX + barW / 2, barY + barH + 8);
   ctx.textAlign = "left";
 
-  // Axe timer bar (when active)
-  const axeBarVisible =
-    gs.axeTimer > 120 || Math.floor(gs.axeTimer / 10) % 2 === 0;
-  if (gs.hasAxe && axeBarVisible) {
-    const axePct = gs.axeTimer / 600;
-    const axeBarX = 438;
-    const axeBarY = 4;
-    const axeBarW = 10;
-    const axeBarH = 42;
-    ctx.fillStyle = "#111111";
-    ctx.fillRect(axeBarX - 1, axeBarY - 1, axeBarW + 2, axeBarH + 2);
-    const axeGrad = ctx.createLinearGradient(
-      axeBarX,
-      axeBarY + axeBarH,
-      axeBarX,
-      axeBarY,
-    );
-    axeGrad.addColorStop(0, "#ffd700");
-    axeGrad.addColorStop(1, "#ff9800");
-    const axeFillH = axeBarH * axePct;
-    ctx.fillStyle = axeGrad;
-    if (axeFillH > 0)
-      ctx.fillRect(axeBarX, axeBarY + axeBarH - axeFillH, axeBarW, axeFillH);
-    // Pulse red glow when nearly expired
-    if (gs.axeTimer < 120) {
-      ctx.shadowColor = "#ff2200";
-      ctx.shadowBlur = 3 + Math.sin(gs.frameCount * 0.3) * 2;
-      ctx.strokeStyle = "#ff4400";
-    } else {
-      ctx.strokeStyle = "#ffd700";
+  // Unified weapon timer bar
+  if (
+    gs.currentWeapon &&
+    gs.currentWeapon !== "dynamite" &&
+    gs.currentWeapon !== "hardhat"
+  ) {
+    const wTimerMax = 600;
+    const wPct = Math.min(1, gs.weaponTimer / wTimerMax);
+    const wBarX = 430;
+    const wBarY = 4;
+    const wBarW = 12;
+    const wBarH = 42;
+    const wNearExp = gs.weaponTimer < 120;
+    const wVisible =
+      gs.weaponTimer > 120 || Math.floor(gs.weaponTimer / 10) % 2 === 0;
+    if (wVisible) {
+      ctx.fillStyle = "#111111";
+      ctx.fillRect(wBarX - 1, wBarY - 1, wBarW + 2, wBarH + 2);
+      const wColors: Record<string, [string, string]> = {
+        pickaxe: ["#ffd700", "#ff9800"],
+        gun: ["#00ff88", "#00ccff"],
+        saltshaker: ["#88ddff", "#aaeeff"],
+      };
+      const [c1, c2] = wColors[gs.currentWeapon] || ["#ffffff", "#aaaaaa"];
+      const wGrad = ctx.createLinearGradient(
+        wBarX,
+        wBarY + wBarH,
+        wBarX,
+        wBarY,
+      );
+      wGrad.addColorStop(0, c1);
+      wGrad.addColorStop(1, c2);
+      const wFillH = wBarH * wPct;
+      ctx.fillStyle = wGrad;
+      if (wFillH > 0)
+        ctx.fillRect(wBarX, wBarY + wBarH - wFillH, wBarW, wFillH);
+      if (wNearExp) {
+        ctx.shadowColor = "#ff2200";
+        ctx.shadowBlur = 3 + Math.sin(gs.frameCount * 0.3) * 2;
+        ctx.strokeStyle = "#ff4400";
+      } else {
+        ctx.strokeStyle = c1;
+      }
+      ctx.lineWidth = 1;
+      ctx.strokeRect(wBarX, wBarY, wBarW, wBarH);
+      ctx.shadowBlur = 0;
+      const wLabels: Record<string, string> = {
+        pickaxe: "AXE",
+        gun: "GUN",
+        saltshaker: "SALT",
+      };
+      ctx.font = "5px monospace";
+      ctx.fillStyle = c1;
+      ctx.textAlign = "center";
+      ctx.fillText(
+        wLabels[gs.currentWeapon] || "WPN",
+        wBarX + wBarW / 2,
+        wBarY + wBarH + 8,
+      );
+      ctx.textAlign = "left";
     }
-    ctx.lineWidth = 1;
-    ctx.strokeRect(axeBarX, axeBarY, axeBarW, axeBarH);
-    ctx.shadowBlur = 0;
-    ctx.font = "6px monospace";
-    ctx.fillStyle = "#ffd700";
-    ctx.textAlign = "center";
-    ctx.fillText("AXE", axeBarX + axeBarW / 2, axeBarY + axeBarH + 8);
-    ctx.textAlign = "left";
   }
-
-  // Gun timer bar (when active)
-  const gunBarVisible =
-    gs.gunTimer > 100 || Math.floor(gs.gunTimer / 10) % 2 === 0;
-  if (gs.hasGun && gunBarVisible) {
-    const gunPct = gs.gunTimer / 500;
-    const gunBarX = 424;
-    const gunBarY = 4;
-    const gunBarW = 10;
-    const gunBarH = 42;
-    ctx.fillStyle = "#111111";
-    ctx.fillRect(gunBarX - 1, gunBarY - 1, gunBarW + 2, gunBarH + 2);
-    const gunGrad = ctx.createLinearGradient(
-      gunBarX,
-      gunBarY + gunBarH,
-      gunBarX,
-      gunBarY,
-    );
-    gunGrad.addColorStop(0, "#00ff88");
-    gunGrad.addColorStop(1, "#00ccff");
-    const gunFillH = gunBarH * gunPct;
-    ctx.fillStyle = gunGrad;
-    if (gunFillH > 0)
-      ctx.fillRect(gunBarX, gunBarY + gunBarH - gunFillH, gunBarW, gunFillH);
-    // Pulse red glow when nearly expired
-    if (gs.gunTimer < 100) {
-      ctx.shadowColor = "#ff2200";
-      ctx.shadowBlur = 3 + Math.sin(gs.frameCount * 0.3) * 2;
-      ctx.strokeStyle = "#ff4400";
-    } else {
-      ctx.strokeStyle = "#00ff88";
-    }
-    ctx.lineWidth = 1;
-    ctx.strokeRect(gunBarX, gunBarY, gunBarW, gunBarH);
-    ctx.shadowBlur = 0;
-    ctx.font = "6px monospace";
-    ctx.fillStyle = "#00ff88";
-    ctx.textAlign = "center";
-    ctx.fillText("GUN", gunBarX + gunBarW / 2, gunBarY + gunBarH + 8);
+  // Hard hat / dynamite icons (use-based weapons)
+  if (gs.currentWeapon === "hardhat") {
+    ctx.save();
+    ctx.shadowColor = "#ffdd00";
+    ctx.shadowBlur = 8;
+    ctx.font = "bold 8px monospace";
+    ctx.fillStyle = "#ffdd00";
+    ctx.textAlign = "right";
+    ctx.fillText("🪖 HAT", 470, 20);
     ctx.textAlign = "left";
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+  if (gs.currentWeapon === "dynamite") {
+    ctx.save();
+    ctx.shadowColor = "#ff4400";
+    ctx.shadowBlur = 8;
+    ctx.font = "bold 8px monospace";
+    ctx.fillStyle = "#ff6600";
+    ctx.textAlign = "right";
+    ctx.fillText("💣 TNT", 470, 20);
+    ctx.textAlign = "left";
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+  // Power-up icon row
+  let puX = 380;
+  const puY = 4;
+  if (gs.hasBubble) {
+    ctx.save();
+    ctx.shadowColor = "#88ddff";
+    ctx.shadowBlur = 6;
+    ctx.font = "bold 7px monospace";
+    ctx.fillStyle = "#88ddff";
+    ctx.fillText("🫧", puX, puY + 12);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    puX -= 18;
+  }
+  if (gs.speedBootsTimer > 0) {
+    const sbFlash =
+      gs.speedBootsTimer < 120 && Math.floor(gs.speedBootsTimer / 8) % 2 === 0;
+    if (!sbFlash) {
+      ctx.save();
+      ctx.shadowColor = "#ff9900";
+      ctx.shadowBlur = 6;
+      ctx.font = "bold 7px monospace";
+      ctx.fillStyle = "#ff9900";
+      ctx.fillText("⚡", puX, puY + 12);
+      ctx.shadowBlur = 0;
+      ctx.restore();
+      puX -= 18;
+    }
+  }
+  if (gs.magnetTimer > 0) {
+    const magFlash =
+      gs.magnetTimer < 120 && Math.floor(gs.magnetTimer / 8) % 2 === 0;
+    if (!magFlash) {
+      ctx.save();
+      ctx.shadowColor = "#cc44ff";
+      ctx.shadowBlur = 6;
+      ctx.font = "bold 7px monospace";
+      ctx.fillStyle = "#cc44ff";
+      ctx.fillText("🧲", puX, puY + 12);
+      ctx.shadowBlur = 0;
+      ctx.restore();
+      puX -= 18;
+    }
+  }
+  if (gs.portfolioShieldTimer > 0) {
+    const psFlash =
+      gs.portfolioShieldTimer < 120 &&
+      Math.floor(gs.portfolioShieldTimer / 8) % 2 === 0;
+    if (!psFlash) {
+      ctx.save();
+      ctx.shadowColor = "#ffd700";
+      ctx.shadowBlur = 6;
+      ctx.font = "bold 7px monospace";
+      ctx.fillStyle = "#ffd700";
+      ctx.fillText("🛡", puX, puY + 12);
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
   }
 
   // Debuff indicator
@@ -4383,7 +5331,11 @@ function drawVictoryScreen(
   ctx.textAlign = "left";
 }
 
-function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
+function renderGame(
+  ctx: CanvasRenderingContext2D,
+  gs: GameState,
+  liteMode = false,
+) {
   ctx.save();
   ctx.scale(320 / 480, 480 / 640);
   ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
@@ -4441,7 +5393,7 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     );
   }
 
-  drawBackground(ctx, gs.level, gs.frameCount);
+  drawBackground(ctx, gs.level, gs.frameCount, liteMode);
 
   // Draw ambient atmosphere particles
   for (const ap of gs.ambientParticles) {
@@ -4604,9 +5556,9 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.restore();
   }
 
-  // Gun pickups
-  for (const gp of gs.gunPickups) {
-    if (!gp.collected) drawGunPickup(ctx, gp.x, gp.y, gs.frameCount);
+  // Spawned pickups
+  for (const sp2 of gs.spawnedPickups) {
+    if (!sp2.collected) drawSpawnedPickup(ctx, sp2, gs.frameCount);
   }
 
   // Bear
@@ -4664,9 +5616,9 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx.restore();
   }
 
-  // Axe pickups
-  for (const ap of gs.axePickups) {
-    if (!ap.collected) drawAxePickup(ctx, ap.x, ap.y, gs.frameCount);
+  // Dynamites in flight
+  for (const dyn of gs.dynamites) {
+    drawDynamiteInFlight(ctx, dyn, gs.frameCount);
   }
 
   // Player
@@ -4674,11 +5626,14 @@ function renderGame(ctx: CanvasRenderingContext2D, gs: GameState) {
     ctx,
     gs.player,
     gs.saltMeter,
-    gs.hasAxe,
-    gs.axeTimer,
+    gs.currentWeapon,
+    gs.weaponTimer,
     gs.dyingTimer,
-    gs.hasGun,
-    gs.gunTimer,
+    gs.hasBubble,
+    gs.speedBootsTimer,
+    gs.magnetTimer,
+    gs.portfolioShieldTimer,
+    liteMode,
   );
 
   // Level transition - dramatic wipe with scanline bars
@@ -4769,16 +5724,28 @@ interface HudData {
   level: number;
   portfolioValue: number;
   saltMeter: number;
-  hasAxe: boolean;
-  axeTimer: number;
-  hasGun: boolean;
-  gunTimer: number;
+  currentWeapon:
+    | "pickaxe"
+    | "gun"
+    | "dynamite"
+    | "saltshaker"
+    | "hardhat"
+    | null;
+  weaponTimer: number;
+  hasBubble: boolean;
+  speedBootsTimer: number;
+  magnetTimer: number;
+  portfolioShieldTimer: number;
   bottlesLeft: number;
   totalBottles: number;
   portfolioMultiplier: number;
 }
 
 export default function Game() {
+  const liteModeRef = useRef(
+    /Tesla|QtWebEngine|CrMo/.test(navigator.userAgent),
+  );
+  const liteMode = liteModeRef.current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gsRef = useRef<GameState>({
     screen: "TITLE",
@@ -4791,9 +5758,17 @@ export default function Game() {
     hazards: [],
     waterBottles: [],
     spawnerStates: [],
-    hasAxe: false,
-    axeTimer: 0,
-    axePickups: [],
+    currentWeapon: null,
+    weaponTimer: 0,
+    weaponSpawnTimer: 60,
+    spawnedPickups: [],
+    nextPickupId: 1,
+    dynamites: [],
+    nextDynamiteId: 1,
+    hasBubble: false,
+    speedBootsTimer: 0,
+    magnetTimer: 0,
+    portfolioShieldTimer: 0,
     portfolioMultiplier: 1.0,
     maturityBags: [],
     communityBags: [],
@@ -4821,10 +5796,7 @@ export default function Game() {
     bearX: 200,
     bearDir: 1,
     bearWalkFrame: 0,
-    hasGun: false,
-    gunTimer: 0,
     gunCooldown: 0,
-    gunPickups: [],
     bullets: [],
     nextBulletId: 1,
     explosionProjectiles: [],
@@ -4851,6 +5823,7 @@ export default function Game() {
     saltFillReduction: 0,
   });
   const rafRef = useRef<number>(0);
+  const lastFrameTimeRef = useRef<number>(0);
   const prevScreenRef = useRef<GameScreen>("TITLE");
   const [leaderboard, setLeaderboard] = useState<
     { name: string; score: number }[]
@@ -4886,10 +5859,12 @@ export default function Game() {
     level: 0,
     portfolioValue: 10000,
     saltMeter: 0,
-    hasAxe: false,
-    axeTimer: 600,
-    hasGun: false,
-    gunTimer: 0,
+    currentWeapon: null,
+    weaponTimer: 0,
+    hasBubble: false,
+    speedBootsTimer: 0,
+    magnetTimer: 0,
+    portfolioShieldTimer: 0,
     bottlesLeft: 0,
     totalBottles: 0,
     portfolioMultiplier: 1.0,
@@ -4985,9 +5960,17 @@ export default function Game() {
     gs.hazards = [];
     gs.waterBottles = [];
     gs.spawnerStates = [];
-    gs.hasAxe = false;
-    gs.axeTimer = 0;
-    gs.axePickups = [];
+    gs.currentWeapon = null;
+    gs.weaponTimer = 0;
+    gs.weaponSpawnTimer = 60;
+    gs.spawnedPickups = [];
+    gs.nextPickupId = 1;
+    gs.dynamites = [];
+    gs.nextDynamiteId = 1;
+    gs.hasBubble = false;
+    gs.speedBootsTimer = 0;
+    gs.magnetTimer = 0;
+    gs.portfolioShieldTimer = 0;
     gs.portfolioMultiplier = 1.0;
     gs.maturityBags = [];
     gs.communityBags = [];
@@ -5092,6 +6075,14 @@ export default function Game() {
     const ctx = canvas.getContext("2d")!;
     let last = 0;
     function loop(ts: number) {
+      if (liteModeRef.current) {
+        const now = performance.now();
+        if (now - lastFrameTimeRef.current < 33) {
+          rafRef.current = requestAnimationFrame(loop);
+          return;
+        }
+        lastFrameTimeRef.current = now;
+      }
       const dt = Math.min((ts - last) / 16.67, 2);
       last = ts;
       const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -5150,7 +6141,7 @@ export default function Game() {
         }
         gs.sfxQueue = [];
       }
-      renderGame(ctx, gs);
+      renderGame(ctx, gs, liteModeRef.current);
       if (gs.screen !== prevScreenRef.current) {
         prevScreenRef.current = gs.screen;
         if (gs.screen === "GAME_OVER" || gs.screen === "VICTORY") {
@@ -5161,13 +6152,15 @@ export default function Game() {
           setNameInput("");
         }
       }
-      if (gs.hasAxe !== hasAxeDisplayRef.current) {
-        hasAxeDisplayRef.current = gs.hasAxe;
-        setHasAxeDisplay(gs.hasAxe);
+      const hasWeapon = gs.currentWeapon !== null;
+      if (hasWeapon !== hasAxeDisplayRef.current) {
+        hasAxeDisplayRef.current = hasWeapon;
+        setHasAxeDisplay(hasWeapon);
       }
-      if (gs.hasGun !== hasGunDisplayRef.current) {
-        hasGunDisplayRef.current = gs.hasGun;
-        setHasGunDisplay(gs.hasGun);
+      const isGun = gs.currentWeapon === "gun";
+      if (isGun !== hasGunDisplayRef.current) {
+        hasGunDisplayRef.current = isGun;
+        setHasGunDisplay(isGun);
       }
       // Update HUD data every frame (React batches these efficiently)
       if (gs.frameCount % 3 === 0) {
@@ -5178,10 +6171,12 @@ export default function Game() {
           level: gs.level,
           portfolioValue: gs.portfolioValue,
           saltMeter: gs.saltMeter,
-          hasAxe: gs.hasAxe,
-          axeTimer: gs.axeTimer,
-          hasGun: gs.hasGun,
-          gunTimer: gs.gunTimer,
+          currentWeapon: gs.currentWeapon,
+          weaponTimer: gs.weaponTimer,
+          hasBubble: gs.hasBubble,
+          speedBootsTimer: gs.speedBootsTimer,
+          magnetTimer: gs.magnetTimer,
+          portfolioShieldTimer: gs.portfolioShieldTimer,
           bottlesLeft,
           totalBottles,
           portfolioMultiplier: gs.portfolioMultiplier,
@@ -5376,68 +6371,107 @@ export default function Game() {
           </div>
         </div>
 
-        {/* Axe timer bar (only when holding axe) */}
-        {hudData.hasAxe && (
-          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <span style={{ color: "#ffd700", fontSize: 9 }}>⛏</span>
-            <div
-              style={{
-                width: 30,
-                height: 8,
-                background: "#1a1a1a",
-                border: "1px solid #666",
-                overflow: "hidden",
-              }}
-            >
+        {/* Weapon timer bar */}
+        {hudData.currentWeapon &&
+          hudData.currentWeapon !== "dynamite" &&
+          hudData.currentWeapon !== "hardhat" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              <span style={{ fontSize: 9 }}>
+                {hudData.currentWeapon === "pickaxe"
+                  ? "⛏"
+                  : hudData.currentWeapon === "gun"
+                    ? "🔫"
+                    : hudData.currentWeapon === "saltshaker"
+                      ? "🧂"
+                      : "🔧"}
+              </span>
               <div
                 style={{
-                  width: `${Math.min(100, (hudData.axeTimer / 600) * 100)}%`,
-                  height: "100%",
-                  background:
-                    hudData.axeTimer < 120
-                      ? Math.floor(Date.now() / 200) % 2 === 0
-                        ? "#ffd700"
-                        : "#ff4444"
-                      : "#ffd700",
+                  width: 30,
+                  height: 8,
+                  background: "#1a1a1a",
+                  border: "1px solid #666",
+                  overflow: "hidden",
                 }}
-              />
+              >
+                <div
+                  style={{
+                    width: `${Math.min(100, (hudData.weaponTimer / 600) * 100)}%`,
+                    height: "100%",
+                    background:
+                      hudData.weaponTimer < 120
+                        ? Math.floor(Date.now() / 200) % 2 === 0
+                          ? "#ffd700"
+                          : "#ff4444"
+                        : hudData.currentWeapon === "gun"
+                          ? "#00ff88"
+                          : hudData.currentWeapon === "saltshaker"
+                            ? "#88ddff"
+                            : "#ffd700",
+                  }}
+                />
+              </div>
             </div>
-          </div>
+          )}
+        {/* Use-based weapon icons */}
+        {hudData.currentWeapon === "dynamite" && (
+          <span style={{ fontSize: 9, color: "#ff6600" }}>💣 TNT</span>
+        )}
+        {hudData.currentWeapon === "hardhat" && (
+          <span style={{ fontSize: 9, color: "#ffdd00" }}>🪖 HAT</span>
+        )}
+        {/* Power-up icons */}
+        {hudData.hasBubble && <span style={{ fontSize: 9 }}>🫧</span>}
+        {hudData.speedBootsTimer > 0 && (
+          <span
+            style={{
+              fontSize: 9,
+              color: "#ff9900",
+              opacity: hudData.speedBootsTimer < 120 ? 0.5 : 1,
+            }}
+          >
+            ⚡
+          </span>
+        )}
+        {hudData.magnetTimer > 0 && (
+          <span
+            style={{
+              fontSize: 9,
+              color: "#cc44ff",
+              opacity: hudData.magnetTimer < 120 ? 0.5 : 1,
+            }}
+          >
+            🧲
+          </span>
+        )}
+        {hudData.portfolioShieldTimer > 0 && (
+          <span
+            style={{
+              fontSize: 9,
+              color: "#ffd700",
+              opacity: hudData.portfolioShieldTimer < 120 ? 0.5 : 1,
+            }}
+          >
+            🛡
+          </span>
         )}
 
-        {/* Gun timer bar (only when holding gun) */}
-        {hudData.hasGun && (
-          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <span style={{ color: "#00ff88", fontSize: 9 }}>🔫</span>
-            <div
-              style={{
-                width: 30,
-                height: 8,
-                background: "#1a1a1a",
-                border: "1px solid #666",
-                overflow: "hidden",
-              }}
-            >
-              <div
-                style={{
-                  width: `${Math.min(100, (hudData.gunTimer / 500) * 100)}%`,
-                  height: "100%",
-                  background:
-                    hudData.gunTimer < 100
-                      ? Math.floor(Date.now() / 200) % 2 === 0
-                        ? "#00ff88"
-                        : "#ff4444"
-                      : "#00ff88",
-                }}
-              />
-            </div>
+        {liteMode && (
+          <div
+            style={{
+              color: "#888",
+              fontSize: 9,
+              marginLeft: "auto",
+              marginRight: 4,
+            }}
+          >
+            LITE
           </div>
         )}
-
         {/* SFX controls (right-aligned) */}
         <div
           style={{
-            marginLeft: "auto",
+            marginLeft: liteMode ? undefined : "auto",
             display: "flex",
             gap: 4,
             alignItems: "center",
@@ -5703,9 +6737,11 @@ export default function Game() {
               }}
             >
               <span aria-hidden>
-                {hasGunDisplay && !hasAxeDisplay ? "🔫" : "⛏"}
+                {hasGunDisplay ? "🔫" : hasAxeDisplay ? "⛏" : "B"}
               </span>
-              <span aria-hidden>B</span>
+              <span aria-hidden>
+                {hasAxeDisplay || hasGunDisplay ? "B" : ""}
+              </span>
             </button>
 
             {/* A / Jump button */}
